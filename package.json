@@ -1,0 +1,18 @@
+{
+    "name": "coull-admin",
+    "private": true,
+    "scripts": {
+        "dev": "wrangler dev --port 8789 --persist-to ../coull-auth/.wrangler/state",
+        "deploy": "wrangler deploy",
+        "lint": "biome check .",
+        "format": "biome format --write ."
+    },
+    "dependencies": {
+        "hono": "^4.7.11"
+    },
+    "devDependencies": {
+        "@biomejs/biome": "latest",
+        "@cloudflare/workers-types": "^4.20260307.0",
+        "wrangler": "^4.13.2"
+    }
+}

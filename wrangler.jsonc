@@ -1,0 +1,33 @@
+{
+    "$schema": "node_modules/wrangler/config-schema.json",
+    "name": "coull-admin",
+    "main": "src/index.ts",
+    "compatibility_date": "2026-03-01",
+    "compatibility_flags": ["nodejs_compat"],
+    "routes": [
+        {
+            "pattern": "admin.coull.ai/*",
+            "zone_name": "coull.ai"
+        }
+    ],
+    "vars": {
+        "AUTH_URL": "https://auth.coull.ai"
+    },
+    "d1_databases": [
+        {
+            // Same database_id as coull-auth — both workers share coull-db.
+            "binding": "DB",
+            "database_name": "coull-db",
+            "database_id": "94948899-03bf-4fee-a950-f8d7b8ff547a"
+        }
+    ],
+    "services": [
+        {
+            // Direct Worker-to-Worker binding — avoids same-zone HTTP 522s.
+            "binding": "AUTH_SERVICE",
+            "service": "coull-auth"
+        }
+    ]
+    // Secrets (set via `wrangler secret put`):
+    //   OWNER_EMAIL — your email address, gates all /admin/* routes
+}

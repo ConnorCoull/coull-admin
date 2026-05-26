@@ -275,7 +275,7 @@ app.get("/requests", async (c) => {
     if (lUnauth) return lUnauth;
 
     const lAllRows = await c.env.DB.prepare(
-        "SELECT id, email, name, createdAt, approved, declined" +
+        "SELECT id, email, name, createdAt, approved, declined, message" +
             " FROM access_requests ORDER BY createdAt DESC",
     ).all<{
         id: string;
@@ -284,6 +284,7 @@ app.get("/requests", async (c) => {
         createdAt: number;
         approved: number;
         declined: number;
+        message: string | null;
     }>();
 
     const lRequests = lAllRows.results;
@@ -317,6 +318,7 @@ app.get("/requests", async (c) => {
       <td>${escapeHtml(r.name ?? "—")}</td>
       <td>${escapeHtml(r.email)}</td>
       <td>${fmtDate(r.createdAt)}</td>
+      <td class="msg-cell">${r.message ? escapeHtml(r.message) : '<span style="color:#bbb">—</span>'}</td>
       <td><span class="action-btns">
         <button class="approve-btn" data-id="${r.id}" onclick="approve(this)">Approve</button>
         <button class="decline-btn" data-id="${r.id}" onclick="decline(this)">Decline</button>
@@ -369,7 +371,7 @@ ${nav("requests")}
     <h1>Access Requests</h1>
     <p class="subtitle" id="pending-count">${lPending.length} pending</p>
     <table>
-      <thead><tr><th>Name</th><th>Email</th><th>Requested</th><th>Action</th></tr></thead>
+      <thead><tr><th>Name</th><th>Email</th><th>Requested</th><th>Message</th><th>Action</th></tr></thead>
       <tbody id="pending-body">${lPendingHtml}</tbody>
     </table>
 
@@ -536,7 +538,7 @@ app.get("/api/admin/requests", async (c) => {
     const lUnauth = await requireOwner(c);
     if (lUnauth) return lUnauth;
     const lRows = await c.env.DB.prepare(
-        "SELECT id, email, name, createdAt, approved, declined" +
+        "SELECT id, email, name, createdAt, approved, declined, message" +
             " FROM access_requests ORDER BY createdAt DESC",
     ).all();
     return c.json(lRows.results);

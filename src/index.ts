@@ -198,6 +198,7 @@ function nav(xiActive: "requests" | "feedback"): string {
 
 // Shared CSS injected into every admin page.
 const SHARED_STYLES = `
+html { height: 100%; }
 *, *::before, *::after { box-sizing: border-box; }
 body {
   font-family: system-ui, sans-serif;
@@ -205,8 +206,11 @@ body {
   padding: 2rem;
   background: #f5f5f5;
   color: #111;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
 }
-.nav { display: flex; gap: 1.25rem; margin-bottom: 2rem; }
+.nav { display: flex; gap: 1.25rem; margin-bottom: 1.25rem; flex-shrink: 0; }
 .nav a {
   color: #666; text-decoration: none;
   font-size: .9rem; padding-bottom: .2rem;
@@ -216,13 +220,9 @@ body {
   border-bottom: 2px solid #111;
 }
 .nav a:hover { color: #111; }
-.layout { display: flex; gap: 2rem; align-items: flex-start; }
-.main { flex: 1; min-width: 0; }
-.sidebar { width: 300px; flex-shrink: 0; position: sticky; top: 2rem; }
-h1 { font-size: 1.25rem; margin: 0 0 .25rem; }
-h2 { font-size: 1rem; margin: 2rem 0 .25rem; }
-h2:first-child { margin-top: 0; }
-.subtitle { color: #666; font-size: .9rem; margin: 0 0 1rem; }
+h1 { font-size: 1.25rem; margin: 0 0 .75rem; flex-shrink: 0; }
+h2 { font-size: 1rem; margin: 0; }
+.subtitle { color: #666; font-size: .85rem; margin: 0; }
 .search, .filter-select {
   width: 100%; padding: .45rem .75rem;
   border: 1px solid #ddd; border-radius: 6px;
@@ -258,6 +258,79 @@ tr:last-child td { border-bottom: none; }
 .decline-btn:disabled,
 .revoke-btn:disabled { opacity: .5; cursor: default; }
 .msg-cell { max-width: 300px; word-break: break-word; white-space: pre-wrap; }
+/* ── Split-pane layout ── */
+.layout {
+  display: flex;
+  flex-direction: row;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+.sidebar {
+  flex-shrink: 0;
+  min-width: 0;
+  overflow-y: auto;
+  padding-left: 1.25rem;
+}
+.panel {
+  overflow-y: auto;
+  min-height: 0;
+  padding-bottom: .75rem;
+}
+.panel-head {
+  display: flex;
+  align-items: baseline;
+  gap: .5rem;
+  margin-bottom: .6rem;
+  flex-shrink: 0;
+}
+/* ── Table scroll containment ── */
+.table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  border-radius: 8px;
+}
+/* ── Drag handles ── */
+.drag-h {
+  width: 5px;
+  cursor: col-resize;
+  background: #ddd;
+  flex-shrink: 0;
+  transition: background .15s;
+}
+.drag-v {
+  height: 5px;
+  cursor: row-resize;
+  background: #ddd;
+  flex-shrink: 0;
+  transition: background .15s;
+}
+.drag-h:hover, .drag-h.dragging,
+.drag-v:hover, .drag-v.dragging { background: #aaa; }
+/* ── Mobile: stack, no drag ── */
+@media (max-width: 768px) {
+  html, body { height: auto; }
+  body { display: block; }
+  .layout { display: block; overflow: visible; }
+  .main { display: block; overflow: visible; }
+  .sidebar { padding-left: 0; padding-top: 1.25rem; overflow-y: visible; }
+  .panel { overflow-y: visible; min-height: unset; }
+  .drag-h, .drag-v { display: none; }
+}
+@media (max-width: 640px) {
+  body { padding: 1rem; }
+  td { padding: .55rem .75rem; font-size: .85rem; }
+  th { padding: .45rem .75rem; }
+  .approve-btn, .decline-btn, .revoke-btn {
+    padding: .45rem 1rem; font-size: .82rem;
+  }
+}
 `;
 
 // ---------------------------------------------------------------------------
@@ -366,33 +439,58 @@ app.get("/requests", async (c) => {
 </head>
 <body>
 ${nav("requests")}
+<h1>Access Requests</h1>
 <div class="layout">
-  <div class="main">
-    <h1>Access Requests</h1>
-    <p class="subtitle" id="pending-count">${lPending.length} pending</p>
-    <table>
-      <thead><tr><th>Name</th><th>Email</th><th>Requested</th><th>Message</th><th>Action</th></tr></thead>
-      <tbody id="pending-body">${lPendingHtml}</tbody>
-    </table>
 
-    <h2>Declined</h2>
-    <p class="subtitle" id="declined-count">${lDeclined.length} declined</p>
-    <input class="search" type="search" placeholder="Search by name or email…" oninput="filterDeclined(this.value)" />
-    <table>
-      <thead><tr><th>Name</th><th>Email</th><th>Requested</th><th>Action</th></tr></thead>
-      <tbody id="declined-body">${lDeclinedHtml}</tbody>
-    </table>
+  <div class="main" id="main-panel">
+    <div class="panel" id="pending-panel">
+      <div class="panel-head">
+        <h2>Pending</h2>
+        <span class="subtitle" id="pending-count">${lPending.length} pending</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Name</th><th>Email</th><th>Requested</th><th>Message</th><th>Action</th></tr></thead>
+          <tbody id="pending-body">${lPendingHtml}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="drag-v" id="drag-v" title="Drag to resize"></div>
+
+    <div class="panel" id="declined-panel">
+      <div class="panel-head">
+        <h2>Declined</h2>
+        <span class="subtitle" id="declined-count">${lDeclined.length} declined</span>
+      </div>
+      <input class="search" type="search" placeholder="Search by name or email…"
+             oninput="filterDeclined(this.value)" />
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Name</th><th>Email</th><th>Requested</th><th>Action</th></tr></thead>
+          <tbody id="declined-body">${lDeclinedHtml}</tbody>
+        </table>
+      </div>
+    </div>
   </div>
 
-  <div class="sidebar">
-    <h2>Approved</h2>
-    <p class="subtitle" id="approved-count">${lApproved.length} users</p>
-    <input class="search" type="search" placeholder="Search…" oninput="filterApproved(this.value)" />
-    <table>
-      <thead><tr><th>Name</th><th>Email</th><th></th></tr></thead>
-      <tbody id="approved-body">${lApprovedHtml}</tbody>
-    </table>
+  <div class="drag-h" id="drag-h" title="Drag to resize"></div>
+
+  <div class="sidebar" id="sidebar-panel">
+    <div class="panel-head">
+      <h2>Approved</h2>
+      <span class="subtitle" id="approved-count">${lApproved.length} users</span>
+    </div>
+    <input class="search" type="search" placeholder="Search…"
+           oninput="filterApproved(this.value)" />
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Name</th><th>Email</th><th></th></tr></thead>
+        <tbody id="approved-body">${lApprovedHtml}</tbody>
+      </table>
+    </div>
   </div>
+
 </div>
 
 <script>
@@ -525,6 +623,75 @@ ${nav("requests")}
       btn.textContent = 'Approve';
     }
   }
+
+  // Drag-to-resize split panes. Sizes persist in localStorage.
+  (function () {
+    var STORE_KEY = 'admin-layout';
+    var MIN = 20, MAX = 80;
+    function load() {
+      try { return JSON.parse(localStorage.getItem(STORE_KEY)) || {}; }
+      catch (_) { return {}; }
+    }
+    function save(obj) {
+      try { localStorage.setItem(STORE_KEY, JSON.stringify(obj)); } catch (_) {}
+    }
+    var state = load();
+    var hPct = Math.min(MAX, Math.max(MIN, state.h || 65));
+    var vPct = Math.min(MAX, Math.max(MIN, state.v || 50));
+    var layoutEl = document.querySelector('.layout');
+    var mainEl = document.getElementById('main-panel');
+    var sideEl = document.getElementById('sidebar-panel');
+    var pendingEl = document.getElementById('pending-panel');
+    var declinedEl = document.getElementById('declined-panel');
+    function applyH(pct) {
+      mainEl.style.flex = '0 0 ' + pct + '%';
+      sideEl.style.flex = '0 0 calc(' + (100 - pct) + '% - 5px)';
+    }
+    function applyV(pct) {
+      pendingEl.style.flex = '0 0 ' + pct + '%';
+      declinedEl.style.flex = '0 0 calc(' + (100 - pct) + '% - 5px)';
+    }
+    applyH(hPct);
+    applyV(vPct);
+    function makeDraggable(handleId, onDrag) {
+      var handle = document.getElementById(handleId);
+      if (!handle) return;
+      var dragging = false;
+      function start(e) {
+        dragging = true;
+        handle.classList.add('dragging');
+        e.preventDefault();
+      }
+      function move(e) {
+        if (!dragging) return;
+        var cx = e.touches ? e.touches[0].clientX : e.clientX;
+        var cy = e.touches ? e.touches[0].clientY : e.clientY;
+        onDrag(cx, cy);
+      }
+      function end() {
+        if (!dragging) return;
+        dragging = false;
+        handle.classList.remove('dragging');
+        save({ h: hPct, v: vPct });
+      }
+      handle.addEventListener('mousedown', start);
+      handle.addEventListener('touchstart', start, { passive: false });
+      document.addEventListener('mousemove', move);
+      document.addEventListener('touchmove', move, { passive: false });
+      document.addEventListener('mouseup', end);
+      document.addEventListener('touchend', end);
+    }
+    makeDraggable('drag-h', function (cx) {
+      var r = layoutEl.getBoundingClientRect();
+      hPct = Math.min(MAX, Math.max(MIN, ((cx - r.left) / r.width) * 100));
+      applyH(hPct);
+    });
+    makeDraggable('drag-v', function (_cx, cy) {
+      var r = mainEl.getBoundingClientRect();
+      vPct = Math.min(MAX, Math.max(MIN, ((cy - r.top) / r.height) * 100));
+      applyV(vPct);
+    });
+  })();
 </script>
 </body>
 </html>`);
@@ -685,14 +852,16 @@ ${nav("feedback")}
   <option value="">All apps</option>
   ${lAppOptions}
 </select>
-<table>
-  <thead>
-    <tr>
-      <th>Date</th><th>App</th><th>User</th><th>Page</th><th>Message</th>
-    </tr>
-  </thead>
-  <tbody id="feedback-body">${lFeedbackHtml}</tbody>
-</table>
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Date</th><th>App</th><th>User</th><th>Page</th><th>Message</th>
+      </tr>
+    </thead>
+    <tbody id="feedback-body">${lFeedbackHtml}</tbody>
+  </table>
+</div>
 
 <script>
   function filterByApp(val) {

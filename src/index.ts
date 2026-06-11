@@ -26,6 +26,35 @@ type Env = {
 
 const app = new Hono<{ Bindings: Env }>();
 
+const FALLBACK_SVG =
+    `<svg width="800" height="800" viewBox="0 0 800 800" fill="none" xmlns="http://www.w3.org/2000/svg">` +
+    `<path d="M0.999023 550H800V800H250.687L0.999023 550Z" fill="#E6BA42"/>` +
+    `<path d="M0.999023 550H800V800H250.687L0.999023 550Z" fill="black" fill-opacity="0.2"/>` +
+    `<path d="M0.999023 550H800V800H250.687L0.999023 550Z" fill="black" fill-opacity="0.2"/>` +
+    `<path d="M0.994772 550L0 249L249.688 0L249.688 800L0.994772 550Z" fill="#E6BA42"/>` +
+    `<path d="M0.994772 550L0 249L249.688 0L249.688 800L0.994772 550Z" fill="black" fill-opacity="0.2"/>` +
+    `<path d="M249.753 0H800V250H0.999023L249.753 0Z" fill="#E6BA42"/>` +
+    `</svg>`;
+
+app.get("/favicon.svg", async (c) => {
+    try {
+        const lHost = c.req.header("host") ?? "";
+        const lSite = lHost.split(".")[0];
+        const lResponse = await fetch(`https://coull.ai/favicon.svg?site=${lSite}`);
+        if (lResponse.ok) {
+            return new Response(lResponse.body, {
+                headers: {
+                    "Content-Type": "image/svg+xml",
+                    "Cache-Control": "public, max-age=3600",
+                },
+            });
+        }
+    } catch {}
+    return c.body(FALLBACK_SVG, 200, { "Content-Type": "image/svg+xml" });
+});
+
+app.get("/favicon.ico", (c) => c.redirect("/favicon.svg", 302));
+
 // Origins permitted to POST /api/feedback with credentials.
 const ALLOWED_ORIGINS = new Set([
     "https://flashcards.coull.ai",
@@ -435,6 +464,7 @@ app.get("/requests", async (c) => {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Admin — Requests</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <style>${SHARED_STYLES}</style>
 </head>
 <body>
@@ -842,6 +872,7 @@ app.get("/feedback", async (c) => {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Admin — Feedback</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <style>${SHARED_STYLES}</style>
 </head>
 <body>

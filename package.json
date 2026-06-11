@@ -4,6 +4,7 @@
     "scripts": {
         "dev": "wrangler dev --port 8789 --persist-to ../coull-auth/.wrangler/state",
         "deploy": "wrangler deploy",
+        "test": "bun test",
         "lint": "biome check .",
         "format": "biome format --write ."
     },

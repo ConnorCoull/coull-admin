@@ -14,6 +14,9 @@
  */
 
 import { type Context, Hono } from "hono";
+import { validateFeedback } from "./lib/feedback-validate";
+import { escapeHtml } from "./lib/html";
+import { WIDGET_SOURCE } from "./widget";
 
 type Env = {
     DB: D1Database;
@@ -58,8 +61,24 @@ app.get("/favicon.ico", (c) => c.redirect("/favicon.svg", 302));
 // Origins permitted to POST /api/feedback with credentials.
 const ALLOWED_ORIGINS = new Set([
     "https://flashcards.coull.ai",
+    "https://coull.ai",
     "http://localhost:5173",
+    "http://localhost:4321",
 ]);
+
+// ---------------------------------------------------------------------------
+// GET /widget.js — embeddable feedback widget for all coull.ai apps.
+// ---------------------------------------------------------------------------
+
+// Inputs: none. Outputs: the widget script with a JS content-type (required
+// alongside the nosniff header below) and a short cache so widget updates
+// propagate to all apps within minutes without cache-busting.
+app.get("/widget.js", (c) =>
+    c.body(WIDGET_SOURCE, 200, {
+        "Content-Type": "text/javascript; charset=utf-8",
+        "Cache-Control": "public, max-age=300",
+    }),
+);
 
 // ---------------------------------------------------------------------------
 // Security headers — applied to every response.
@@ -96,20 +115,6 @@ app.use("*", async (c, next) => {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/**
- * Inputs: raw string from untrusted source.
- * Outputs: HTML-safe string with &, <, >, ", ' escaped.
- * Logic: prevents XSS when interpolating user data into HTML templates.
- */
-function escapeHtml(xiStr: string): string {
-    return xiStr
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#39;");
-}
 
 /**
  * Inputs: timestamp in Unix ms.
@@ -823,7 +828,7 @@ app.get("/feedback", async (c) => {
 
     const lRows = await c.env.DB.prepare(
         "SELECT id, user_email, user_name, app_name, page_url," +
-            " message, created_at" +
+            " message, reason, created_at" +
             " FROM feedback ORDER BY created_at DESC",
     ).all<{
         id: string;
@@ -832,6 +837,7 @@ app.get("/feedback", async (c) => {
         app_name: string;
         page_url: string;
         message: string;
+        reason: string | null;
         created_at: number;
     }>();
 
@@ -842,9 +848,23 @@ app.get("/feedback", async (c) => {
         )
         .join("");
 
+    // Reasons present in the data (pre-migration rows have none).
+    const lReasons = [
+        ...new Set(
+            lRows.results
+                .map((r) => r.reason)
+                .filter((r): r is string => r !== null),
+        ),
+    ];
+    const lReasonOptions = lReasons
+        .map(
+            (r) => `<option value="${escapeHtml(r)}">${escapeHtml(r)}</option>`,
+        )
+        .join("");
+
     const lFeedbackHtml =
         lRows.results.length === 0
-            ? `<tr><td colspan="5" style="text-align:center;color:#888;padding:2rem">No feedback yet</td></tr>`
+            ? `<tr><td colspan="6" style="text-align:center;color:#888;padding:2rem">No feedback yet</td></tr>`
             : lRows.results
                   .map((r) => {
                       const lUserCell = r.user_email
@@ -855,10 +875,14 @@ app.get("/feedback", async (c) => {
                           r.page_url.length > 50
                               ? `${r.page_url.slice(0, 50)}…`
                               : r.page_url;
+                      const lReasonCell = r.reason
+                          ? escapeHtml(r.reason)
+                          : `<span style="color:#bbb">—</span>`;
                       return `
-    <tr class="feedback-row" data-app="${escapeHtml(r.app_name)}">
+    <tr class="feedback-row" data-app="${escapeHtml(r.app_name)}" data-reason="${escapeHtml(r.reason ?? "")}">
       <td style="white-space:nowrap">${fmtDate(r.created_at)}</td>
       <td><code>${escapeHtml(r.app_name)}</code></td>
+      <td>${lReasonCell}</td>
       <td>${lUserCell}</td>
       <td title="${escapeHtml(r.page_url)}" style="font-size:.8rem;color:#555">${escapeHtml(lPageDisplay)}</td>
       <td class="msg-cell">${escapeHtml(r.message)}</td>
@@ -879,15 +903,19 @@ app.get("/feedback", async (c) => {
 ${nav("feedback")}
 <h1>Feedback</h1>
 <p class="subtitle">${lRows.results.length} submissions</p>
-<select class="filter-select" oninput="filterByApp(this.value)" style="max-width:200px">
+<select id="app-filter" class="filter-select" oninput="applyFilters()" style="max-width:200px">
   <option value="">All apps</option>
   ${lAppOptions}
+</select>
+<select id="reason-filter" class="filter-select" oninput="applyFilters()" style="max-width:200px">
+  <option value="">All reasons</option>
+  ${lReasonOptions}
 </select>
 <div class="table-wrap">
   <table>
     <thead>
       <tr>
-        <th>Date</th><th>App</th><th>User</th><th>Page</th><th>Message</th>
+        <th>Date</th><th>App</th><th>Reason</th><th>User</th><th>Page</th><th>Message</th>
       </tr>
     </thead>
     <tbody id="feedback-body">${lFeedbackHtml}</tbody>
@@ -895,9 +923,13 @@ ${nav("feedback")}
 </div>
 
 <script>
-  function filterByApp(val) {
+  function applyFilters() {
+    const app = document.getElementById('app-filter').value;
+    const reason = document.getElementById('reason-filter').value;
     document.querySelectorAll('.feedback-row').forEach(row => {
-      row.style.display = !val || row.dataset.app === val ? '' : 'none';
+      const show = (!app || row.dataset.app === app)
+        && (!reason || row.dataset.reason === reason);
+      row.style.display = show ? '' : 'none';
     });
   }
 </script>
@@ -962,57 +994,40 @@ app.post("/api/feedback", async (c) => {
         } catch (_) {}
     }
 
-    let lBody: { message?: string; appName?: string; pageUrl?: string };
+    let lBody: {
+        message?: string;
+        appName?: string;
+        pageUrl?: string;
+        reason?: string;
+    };
     try {
         lBody = await c.req.json();
     } catch (_) {
         return c.json({ error: "Invalid JSON" }, 400, lCors);
     }
 
-    const lMessage = lBody.message?.trim() ?? "";
-    const lAppName = lBody.appName?.trim() ?? "";
-    const lPageUrl = lBody.pageUrl?.trim() ?? "";
-
-    if (!lMessage || !lAppName || !lPageUrl) {
-        return c.json(
-            { error: "message, appName, and pageUrl are required" },
-            400,
-            lCors,
-        );
+    const lChecked = validateFeedback(lBody);
+    if (!lChecked.ok) {
+        return c.json({ error: lChecked.error }, 400, lCors);
     }
-    if (lMessage.length > 2000) {
-        return c.json(
-            { error: "message too long (max 2000 chars)" },
-            400,
-            lCors,
-        );
-    }
-    if (lAppName.length > 64) {
-        return c.json({ error: "appName too long (max 64 chars)" }, 400, lCors);
-    }
-    if (lPageUrl.length > 512) {
-        return c.json(
-            { error: "pageUrl too long (max 512 chars)" },
-            400,
-            lCors,
-        );
-    }
+    const lFields = lChecked.fields;
 
     const lId = crypto.randomUUID();
     await c.env.DB.prepare(
         "INSERT INTO feedback" +
             " (id, user_id, user_email, user_name, app_name, page_url," +
-            "  message, created_at)" +
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "  message, reason, created_at)" +
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
         .bind(
             lId,
             lUser?.id ?? null,
             lUser?.email ?? null,
             lUser?.name ?? null,
-            lAppName,
-            lPageUrl,
-            lMessage,
+            lFields.appName,
+            lFields.pageUrl,
+            lFields.message,
+            lFields.reason,
             Date.now(),
         )
         .run();

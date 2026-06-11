@@ -43,7 +43,9 @@ app.get("/favicon.svg", async (c) => {
     try {
         const lHost = c.req.header("host") ?? "";
         const lSite = lHost.split(".")[0];
-        const lResponse = await fetch(`https://coull.ai/favicon.svg?site=${lSite}`);
+        const lResponse = await fetch(
+            `https://coull.ai/favicon.svg?site=${lSite}`,
+        );
         if (lResponse.ok) {
             return new Response(lResponse.body, {
                 headers: {

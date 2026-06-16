@@ -102,6 +102,7 @@ app.use("*", async (c, next) => {
             "default-src 'self'",
             "script-src 'self' 'unsafe-inline'",
             "style-src 'self' 'unsafe-inline'",
+            "img-src 'self' data:",
             "connect-src 'self'",
             "frame-ancestors 'none'",
             "base-uri 'self'",
@@ -1005,7 +1006,7 @@ app.get("/favicon", async (c) => {
 
     const lGlobalStatus = lGlobalSvg
         ? `<span class="badge badge-custom">Custom</span>`
-        : `<span class="badge badge-default">Hardcoded fallback</span>`;
+        : `<span class="badge badge-default">Default</span>`;
     const lGlobalReset = lGlobalSvg
         ? `<button class="decline-btn" onclick="resetDefault(this)">` +
           `Reset to fallback</button>`
@@ -1023,8 +1024,7 @@ app.get("/favicon", async (c) => {
 </head>
 <body>
 ${nav("favicon")}
-<h1>Favicons <span id="lib-count"
-  style="font-size:.6em;color:#999;font-weight:400"></span></h1>
+<h1>Favicons</h1>
 <p class="subtitle">Per-site icons served at
   <code>coull.ai/favicon.svg?site=…</code></p>
 
@@ -1107,12 +1107,6 @@ async function loadLibrary() {
   var res = await fetch('/api/admin/favicon-library');
   if (!res.ok) return;
   library = await res.json();
-  var cnt = document.getElementById('lib-count');
-  if (cnt) {
-    var n = library.length;
-    cnt.textContent = '('
-      + n + ' design' + (n !== 1 ? 's' : '') + ')';
-  }
   renderLibraryGrid();
 }
 
@@ -1212,13 +1206,23 @@ async function uploadDesign() {
   document.getElementById('design-name').value = '';
   document.getElementById('design-file').value = '';
   document.getElementById('upload-preview').style.display = 'none';
-  await loadLibrary();
+  /* Optimistic: update local state immediately instead of re-fetching from KV
+     (KV list has eventual consistency — a fresh list call may miss a new key) */
+  var idx = library.findIndex(function(d) { return d.name === name; });
+  if (idx >= 0) {
+    library[idx] = { name: name, svg: svg };
+  } else {
+    library.push({ name: name, svg: svg });
+    library.sort(function(a, b) { return a.name.localeCompare(b.name); });
+  }
+  renderLibraryGrid();
 }
 
 async function deleteDesign(name) {
   if (!confirm('Delete design "' + name + '"?')) return;
   await fetch('/api/admin/favicon-library/' + name, { method: 'DELETE' });
-  await loadLibrary();
+  library = library.filter(function(d) { return d.name !== name; });
+  renderLibraryGrid();
 }
 
 function closePicker() {

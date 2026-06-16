@@ -446,19 +446,25 @@ tr:last-child td { border-bottom: none; }
   display: inline-flex; align-items: center; flex-shrink: 0;
 }
 .eye-btn:hover { color: #111; }
-/* ── Preset strip ── */
-.preset-strip {
-  display: flex; align-items: center; gap: .4rem;
-  margin: .4rem 0; flex-wrap: wrap;
+/* ── Favicon picker ── */
+.favicon-picker {
+  display: flex; gap: .5rem; flex-wrap: wrap;
+  margin: .5rem 0; padding: .5rem;
+  background: #f9f9f9; border-radius: 6px; border: 1px solid #eee;
+  min-height: 60px;
 }
-.preset-label { font-size: .78rem; color: #888; flex-shrink: 0; }
-.preset-btn {
-  display: inline-flex; align-items: center; gap: .3rem;
-  padding: .2rem .45rem; border: 1px solid #ddd; border-radius: 4px;
-  background: #fafafa; cursor: pointer; font-size: .78rem; color: #555;
+.favicon-picker:empty::before {
+  content: 'No presets'; color: #bbb; font-size: .8rem; align-self: center;
 }
-.preset-btn:hover { background: #f0f0f0; border-color: #bbb; color: #111; }
-.preset-btn img { border-radius: 2px; display: block; }
+.pick-btn {
+  display: inline-flex; flex-direction: column; align-items: center;
+  gap: .2rem; padding: .4rem .5rem; border: 2px solid #ddd;
+  border-radius: 6px; background: #fff; cursor: pointer;
+  font-size: .72rem; color: #555; min-width: 52px;
+}
+.pick-btn:hover { border-color: #999; background: #f5f5f5; }
+.pick-btn.selected { border-color: #111; background: #f0f0f0; }
+.pick-btn img { border-radius: 2px; display: block; }
 `;
 
 // Inline SVG icons for the email reveal toggle button.
@@ -513,37 +519,6 @@ const FAVICON_PRESETS: { label: string; svg: string }[] = [
             `</svg>`,
     },
 ];
-
-/**
- * Inputs: textarea DOM id, kind ('site'|'new'|'default'), kindArg (site name).
- * Outputs: HTML string for the preset picker strip.
- * Logic: renders one button per preset; clicking applies SVG to the textarea.
- */
-function presetStripHtml(
-    xiTextareaId: string,
-    xiKind: "site" | "new" | "default",
-    xiKindArg: string,
-): string {
-    if (FAVICON_PRESETS.length === 0) return "";
-    const lBtns = FAVICON_PRESETS.map((lP, lI) => {
-        const lThumb = `data:image/svg+xml,${encodeURIComponent(lP.svg)}`;
-        const lOnclick =
-            `applyPreset('${escapeHtml(xiTextareaId)}',` +
-            `'${xiKind}','${escapeHtml(xiKindArg)}',${lI})`;
-        return (
-            `<button class="preset-btn" onclick="${lOnclick}"` +
-            ` title="${escapeHtml(lP.label)}">` +
-            `<img src="${lThumb}" width="20" height="20" alt="">` +
-            ` ${escapeHtml(lP.label)}` +
-            `</button>`
-        );
-    }).join("");
-    return (
-        `<div class="preset-strip">` +
-        `<span class="preset-label">Presets:</span>${lBtns}` +
-        `</div>`
-    );
-}
 
 const SITE_RE = /^[a-z0-9-]{1,63}$/;
 
@@ -1049,14 +1024,14 @@ app.get("/favicon", async (c) => {
       <td colspan="4">
         <div class="edit-area">
           <div style="flex:1;min-width:0">
+            <div class="favicon-picker" id="picker-${lSite}"></div>
             <textarea
               id="svg-input-${lSite}"
               class="svg-textarea"
-              rows="8"
-              placeholder="Paste SVG here…"
+              rows="4"
+              placeholder="Or paste custom SVG…"
               oninput="updatePreview('${lSite}')"
             ></textarea>
-            ${presetStripHtml(`svg-input-${lSite}`, "site", lSite)}
             <div style="display:flex;gap:.5rem;margin-top:.5rem">
               <button class="approve-btn"
                       onclick="saveFavicon('${lSite}')">Save</button>
@@ -1109,10 +1084,10 @@ app.get("/favicon", async (c) => {
         ` style="display:none;margin-top:.75rem">` +
         `\n    <div class="edit-area">` +
         `\n      <div style="flex:1;min-width:0">` +
+        `\n        <div class="favicon-picker" id="picker-default"></div>` +
         `\n        <textarea id="default-svg-input" class="svg-textarea"` +
-        ` rows="8" placeholder="Paste SVG here…"` +
+        ` rows="4" placeholder="Or paste custom SVG…"` +
         `\n                  oninput="updateDefaultPreview()"></textarea>` +
-        `\n        ${presetStripHtml("default-svg-input", "default", "")}` +
         `\n        <div style="display:flex;gap:.5rem;margin-top:.5rem">` +
         `\n          <button class="approve-btn"` +
         ` onclick="saveDefault()">Save</button>` +
@@ -1148,7 +1123,7 @@ ${nav("favicon")}
   <code>coull.ai/favicon.svg?site=…</code>
 </p>
 ${lDefaultCardHtml}
-<div class="table-wrap" style="margin-top:1.5rem">
+<div class="table-wrap" style="margin-top:1.5rem;flex:1;overflow-y:auto;min-height:0">
   <table>
     <thead>
       <tr>
@@ -1159,9 +1134,10 @@ ${lDefaultCardHtml}
   </table>
 </div>
 
-<div class="add-form">
+<div class="add-form" style="flex-shrink:0">
   <h2>Add site</h2>
-  <div class="add-form-row">
+  <div class="favicon-picker" id="picker-new"></div>
+  <div class="add-form-row" style="margin-top:.5rem">
     <div>
       <input type="text" id="new-site-name"
              placeholder="subdomain" maxlength="63"
@@ -1169,10 +1145,9 @@ ${lDefaultCardHtml}
              title="Lowercase letters, digits, hyphens only">
     </div>
     <div style="flex:1;min-width:0">
-      <textarea id="new-svg-input" class="svg-textarea" rows="6"
-                placeholder="Paste SVG here…"
+      <textarea id="new-svg-input" class="svg-textarea" rows="4"
+                placeholder="Or paste custom SVG…"
                 oninput="updateNewPreview()"></textarea>
-      ${presetStripHtml("new-svg-input", "new", "")}
     </div>
     <img id="new-preview" width="80" height="80" alt="Preview"
          style="border:1px solid #eee;border-radius:4px;` +
@@ -1191,6 +1166,44 @@ ${lDefaultCardHtml}
   var FAVICON_PRESETS = ${JSON.stringify(
       FAVICON_PRESETS.map((lP) => ({ label: lP.label, svg: lP.svg })),
   )};
+  var STORED_FAVICONS = ${JSON.stringify(Object.fromEntries(lSvgMap))};
+
+  var pickerData = {};
+
+  function renderPicker(pickerId, textareaId, kind, kindArg, currentSvg) {
+    var options = [];
+    FAVICON_PRESETS.forEach(function(p) {
+      options.push({ label: p.label, svg: p.svg });
+    });
+    Object.keys(STORED_FAVICONS).forEach(function(s) {
+      if (s === kindArg) return;
+      options.push({ label: s, svg: STORED_FAVICONS[s] });
+    });
+    pickerData[pickerId] = options;
+    var html = options.map(function(opt, i) {
+      var thumb = 'data:image/svg+xml,' + encodeURIComponent(opt.svg);
+      var sel = opt.svg === currentSvg ? ' selected' : '';
+      return '<button class="pick-btn' + sel + '"'
+        + ' onclick="pickFavicon(\'' + pickerId + '\',\'' + textareaId
+        + '\',\'' + kind + '\',\'' + kindArg + '\',' + i + ',this)">'
+        + '<img src="' + thumb + '" width="32" height="32" alt="">'
+        + '<span>' + opt.label + '</span>'
+        + '</button>';
+    }).join('');
+    document.getElementById(pickerId).innerHTML = html;
+  }
+
+  function pickFavicon(pickerId, textareaId, kind, kindArg, idx, btn) {
+    var svg = pickerData[pickerId][idx].svg;
+    document.getElementById(textareaId).value = svg;
+    if (kind === 'site') updatePreview(kindArg);
+    else if (kind === 'new') updateNewPreview();
+    else updateDefaultPreview();
+    document.getElementById(pickerId)
+      .querySelectorAll('.pick-btn')
+      .forEach(function(b) { b.classList.remove('selected'); });
+    btn.classList.add('selected');
+  }
 
   // ── Per-site edit ──────────────────────────────────────────────────────────
 
@@ -1198,8 +1211,10 @@ ${lDefaultCardHtml}
     var row = document.getElementById('row-' + site);
     var editRow = document.getElementById('edit-' + site);
     var textarea = document.getElementById('svg-input-' + site);
-    textarea.value = row.dataset.svg || '';
+    var currentSvg = row.dataset.svg || '';
+    textarea.value = currentSvg;
     updatePreview(site);
+    renderPicker('picker-' + site, 'svg-input-' + site, 'site', site, currentSvg);
     editRow.style.display = '';
     textarea.focus();
   }
@@ -1213,13 +1228,6 @@ ${lDefaultCardHtml}
     var svg = document.getElementById('svg-input-' + site).value.trim();
     document.getElementById('preview-' + site).src = svg
       ? 'data:image/svg+xml,' + encodeURIComponent(svg) : '';
-  }
-
-  function applyPreset(textareaId, kind, kindArg, idx) {
-    document.getElementById(textareaId).value = FAVICON_PRESETS[idx].svg;
-    if (kind === 'site') updatePreview(kindArg);
-    else if (kind === 'new') updateNewPreview();
-    else updateDefaultPreview();
   }
 
   async function saveFavicon(site) {
@@ -1303,6 +1311,10 @@ ${lDefaultCardHtml}
     var ta = document.getElementById('default-svg-input');
     ta.value = DEFAULT_STORED_SVG;
     updateDefaultPreview();
+    renderPicker(
+      'picker-default', 'default-svg-input', 'default', '',
+      DEFAULT_STORED_SVG
+    );
     document.getElementById('default-edit-area').style.display = '';
     ta.focus();
   }
@@ -1358,6 +1370,8 @@ ${lDefaultCardHtml}
     if (!res.ok) { btn.disabled = false; return; }
     window.location.reload();
   }
+
+  renderPicker('picker-new', 'new-svg-input', 'new', '', '');
 </script>
 </body>
 </html>`,

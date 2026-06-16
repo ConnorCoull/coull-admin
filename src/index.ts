@@ -955,18 +955,12 @@ app.get("/favicon", async (c) => {
     );
 
     const lGlobalSvg = await c.env.PLATFORM_ASSETS.get("platform_favicon");
-    const lDefaultSvg = lGlobalSvg ?? FALLBACK_SVG;
-    const lDefaultDataUrl = `data:image/svg+xml,${encodeURIComponent(
-        lDefaultSvg,
-    )}`;
 
     const lRowsHtml = lAllSites
         .map((lSite) => {
             const lSvg = lSvgMap.get(lSite);
             const lIsCustom = lSvg !== undefined;
-            const lThumbSrc = lIsCustom
-                ? `data:image/svg+xml,${encodeURIComponent(lSvg)}`
-                : lDefaultDataUrl;
+            const lThumbSrc = `/favicon.svg?site=${encodeURIComponent(lSite)}`;
             const lStatusHtml = lIsCustom
                 ? `<span class="badge badge-custom">Custom</span>`
                 : `<span class="badge badge-default">Default</span>`;
@@ -1038,7 +1032,7 @@ app.get("/favicon", async (c) => {
         ` Key: <code>platform_favicon</code>` +
         `\n  </p>` +
         `\n  <div style="display:flex;gap:1rem;align-items:center">` +
-        `\n    <img id="default-thumb" src="${lDefaultDataUrl}"` +
+        `\n    <img id="default-thumb" src="/favicon.svg"` +
         ` width="48" height="48" alt=""` +
         `\n         style="border:1px solid #eee;border-radius:4px;` +
         `background:#fafafa;flex-shrink:0">` +
@@ -1087,7 +1081,7 @@ ${nav("favicon")}
 <h1>Favicons</h1>
 <p class="subtitle">
   Per-site icons served at
-  <code>admin.coull.ai/favicon.svg?site=…</code>
+  <code>coull.ai/favicon.svg?site=…</code>
 </p>
 ${lDefaultCardHtml}
 <div class="table-wrap" style="margin-top:1.5rem">
@@ -1127,7 +1121,6 @@ ${lDefaultCardHtml}
 </div>
 
 <script>
-  var DEFAULT_DATA_URL = ${JSON.stringify(lDefaultDataUrl)};
   var KNOWN_SITES = ${JSON.stringify([...KNOWN_SITES])};
   var DEFAULT_STORED_SVG = ${JSON.stringify(lGlobalSvg ?? "")};
 
@@ -1168,7 +1161,7 @@ ${lDefaultCardHtml}
     var row = document.getElementById('row-' + site);
     row.dataset.svg = svg;
     document.getElementById('thumb-' + site).src =
-      'data:image/svg+xml,' + encodeURIComponent(svg);
+      '/favicon.svg?site=' + encodeURIComponent(site) + '&t=' + Date.now();
     document.getElementById('status-' + site).innerHTML =
       '<span class="badge badge-custom">Custom</span>';
     var actionsEl = document.getElementById('actions-' + site);
@@ -1194,7 +1187,8 @@ ${lDefaultCardHtml}
     }
     var row = document.getElementById('row-' + site);
     row.dataset.svg = '';
-    document.getElementById('thumb-' + site).src = DEFAULT_DATA_URL;
+    document.getElementById('thumb-' + site).src =
+      '/favicon.svg?site=' + encodeURIComponent(site) + '&t=' + Date.now();
     document.getElementById('status-' + site).innerHTML =
       '<span class="badge badge-default">Default</span>';
     btn.remove();
@@ -1261,9 +1255,8 @@ ${lDefaultCardHtml}
     var data = await res.json();
     if (!res.ok) { errEl.textContent = data.error || 'Save failed'; return; }
     DEFAULT_STORED_SVG = svg;
-    var dataUrl = 'data:image/svg+xml,' + encodeURIComponent(svg);
-    DEFAULT_DATA_URL = dataUrl;
-    document.getElementById('default-thumb').src = dataUrl;
+    var t = Date.now();
+    document.getElementById('default-thumb').src = '/favicon.svg?t=' + t;
     document.getElementById('default-status').innerHTML =
       '<span class="badge badge-custom">Custom</span>';
     var actEl = document.getElementById('default-actions');
@@ -1277,7 +1270,8 @@ ${lDefaultCardHtml}
     document.querySelectorAll('[id^="thumb-"]').forEach(function(img) {
       var site = img.id.slice('thumb-'.length);
       var row = document.getElementById('row-' + site);
-      if (row && !row.dataset.svg) img.src = dataUrl;
+      if (row && !row.dataset.svg)
+        img.src = '/favicon.svg?site=' + encodeURIComponent(site) + '&t=' + t;
     });
     closeDefaultEdit();
   }

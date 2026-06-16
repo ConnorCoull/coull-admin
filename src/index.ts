@@ -377,30 +377,12 @@ tr:last-child td { border-bottom: none; }
 }
 .badge-custom { background: #e8f5e9; color: #2e7d32; }
 .badge-default { background: #f5f5f5; color: #888; }
-.edit-area {
-  display: flex; gap: 1.25rem;
-  align-items: flex-start; padding: .75rem 0;
-}
-.svg-textarea {
-  width: 100%; font-family: monospace; font-size: .8rem;
-  border: 1px solid #ddd; border-radius: 6px;
-  padding: .5rem; resize: vertical;
-}
-.svg-textarea:focus { outline: 2px solid #111; border-color: transparent; }
 .add-form {
   margin-top: 1.5rem; padding: 1.25rem;
   background: #fff; border-radius: 8px;
   box-shadow: 0 1px 4px rgba(0,0,0,.08);
 }
 .add-form h2 { font-size: .95rem; margin: 0 0 .75rem; }
-.add-form-row { display: flex; gap: 1.25rem; align-items: flex-start; }
-.add-form input[type=text] {
-  width: 200px; padding: .45rem .75rem;
-  border: 1px solid #ddd; border-radius: 6px; font-size: .9rem;
-}
-.add-form input[type=text]:focus {
-  outline: 2px solid #111; border-color: transparent;
-}
 /* ── Feedback archive ── */
 .archive-btn {
   padding: .3rem .8rem; border: none; border-radius: 4px;
@@ -446,25 +428,41 @@ tr:last-child td { border-bottom: none; }
   display: inline-flex; align-items: center; flex-shrink: 0;
 }
 .eye-btn:hover { color: #111; }
-/* ── Favicon picker ── */
-.favicon-picker {
-  display: flex; gap: .5rem; flex-wrap: wrap;
-  margin: .5rem 0; padding: .5rem;
-  background: #f9f9f9; border-radius: 6px; border: 1px solid #eee;
-  min-height: 60px;
+/* ── Favicon library ── */
+.library-grid {
+  display: flex; flex-wrap: wrap; gap: .75rem;
+  min-height: 64px; align-items: flex-start;
 }
-.favicon-picker:empty::before {
-  content: 'No presets'; color: #bbb; font-size: .8rem; align-self: center;
+.design-card {
+  display: flex; flex-direction: column; align-items: center;
+  gap: .3rem; padding: .6rem .75rem; position: relative;
+  border: 2px solid #eee; border-radius: 8px; background: #fff;
+  min-width: 80px; transition: border-color .12s;
 }
-.pick-btn {
-  display: inline-flex; flex-direction: column; align-items: center;
-  gap: .2rem; padding: .4rem .5rem; border: 2px solid #ddd;
-  border-radius: 6px; background: #fff; cursor: pointer;
-  font-size: .72rem; color: #555; min-width: 52px;
+.design-card.clickable { cursor: pointer; }
+.design-card.clickable:hover { border-color: #111; }
+.design-name {
+  font-size: .75rem; color: #555; text-align: center;
+  max-width: 80px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.pick-btn:hover { border-color: #999; background: #f5f5f5; }
-.pick-btn.selected { border-color: #111; background: #f0f0f0; }
-.pick-btn img { border-radius: 2px; display: block; }
+.del-btn {
+  position: absolute; top: .2rem; right: .3rem;
+  background: none; border: none; cursor: pointer;
+  color: #ccc; font-size: .9rem; line-height: 1; padding: 0;
+}
+.del-btn:hover { color: #c0392b; }
+.upload-row {
+  display: flex; align-items: center; gap: .6rem; flex-wrap: wrap;
+  margin-top: .75rem; padding-top: .75rem;
+  border-top: 1px solid #f0f0f0;
+}
+.file-btn {
+  display: inline-block; padding: .35rem .75rem;
+  border: 1px solid #ddd; border-radius: 6px;
+  font-size: .85rem; background: #fafafa; cursor: pointer;
+}
+.file-btn:hover { background: #efefef; }
 `;
 
 // Inline SVG icons for the email reveal toggle button.
@@ -503,34 +501,8 @@ function emailCellHtml(xiEmail: string): string {
 
 const KNOWN_SITES = ["coull", "admin", "auth", "flashcards"] as const;
 
-const FAVICON_PRESETS: { label: string; svg: string }[] = [
-    {
-        label: "Default",
-        svg: FALLBACK_SVG,
-    },
-    {
-        label: "Heve Monet",
-        svg:
-            `<svg width="801" height="800" viewBox="0 0 801 800"` +
-            ` fill="none" xmlns="http://www.w3.org/2000/svg">` +
-            `<path d="M1 550H801V800H251L1 550Z" fill="#383127"/>` +
-            `<path d="M1 550L0 249L251 0L251 800L1 550Z" fill="#6F5129"/>` +
-            `<path d="M250.065 0H801V250H1L250.065 0Z" fill="#73422E"/>` +
-            `</svg>`,
-    },
-];
-
 const SITE_RE = /^[a-z0-9-]{1,63}$/;
-
-/**
- * Inputs: any JSON-serialisable value.
- * Outputs: JSON string safe to embed directly in an HTML <script> block.
- * Logic: escapes '</' so the HTML parser cannot mistake SVG/HTML inside
- * string values for a closing </script> tag.
- */
-function safeJson(xiData: unknown): string {
-    return JSON.stringify(xiData).replace(/<\//g, "<\\/");
-}
+const LIBRARY_NAME_RE = /^[a-z0-9-]{1,63}$/;
 
 /**
  * Inputs: raw SVG string submitted by the client.
@@ -981,7 +953,6 @@ app.get("/favicon", async (c) => {
     const lUnauth = await requireOwner(c);
     if (lUnauth) return lUnauth;
 
-    // Discover all configured sites from KV and merge with well-known list.
     const lList = await c.env.PLATFORM_ASSETS.list({
         prefix: "platform_favicon:",
     });
@@ -989,131 +960,56 @@ app.get("/favicon", async (c) => {
         k.name.slice("platform_favicon:".length),
     );
     const lAllSites = [...new Set([...KNOWN_SITES, ...lCustomSites])];
-
-    // Fetch SVG values only for custom sites.
-    const lSvgMap = new Map<string, string>();
-    await Promise.all(
-        lCustomSites.map(async (lSite) => {
-            const lVal = await c.env.PLATFORM_ASSETS.get(
-                `platform_favicon:${lSite}`,
-            );
-            if (lVal) lSvgMap.set(lSite, lVal);
-        }),
-    );
+    const lCustomSet = new Set(lCustomSites);
 
     const lGlobalSvg = await c.env.PLATFORM_ASSETS.get("platform_favicon");
 
     const lRowsHtml = lAllSites
         .map((lSite) => {
-            const lSvg = lSvgMap.get(lSite);
-            const lIsCustom = lSvg !== undefined;
+            const lIsCustom = lCustomSet.has(lSite);
             const lThumbSrc = `/favicon.svg?site=${encodeURIComponent(lSite)}`;
             const lStatusHtml = lIsCustom
                 ? `<span class="badge badge-custom">Custom</span>`
                 : `<span class="badge badge-default">Default</span>`;
             const lResetBtn = lIsCustom
                 ? `<button class="decline-btn"` +
-                  ` onclick="resetFavicon('${lSite}',this)">Reset</button>`
+                  ` onclick="resetSite('${lSite}',this)">Reset</button>`
                 : "";
             return (
-                `
-    <tr id="row-${lSite}" data-svg="${escapeHtml(lSvg ?? "")}">
-      <td>
-        <img id="thumb-${lSite}" src="${lThumbSrc}"
-             width="32" height="32" alt="">
-      </td>
-      <td><code>${escapeHtml(lSite)}</code></td>
-      <td id="status-${lSite}">${lStatusHtml}</td>
-      <td class="action-btns" id="actions-${lSite}">
-        <button class="approve-btn"
-                onclick="openEdit('${lSite}')">Edit</button>
-        ${lResetBtn}
-      </td>
-    </tr>
-    <tr id="edit-${lSite}" style="display:none">
-      <td colspan="4">
-        <div class="edit-area">
-          <div style="flex:1;min-width:0">
-            <div class="favicon-picker" id="picker-${lSite}"></div>
-            <textarea
-              id="svg-input-${lSite}"
-              class="svg-textarea"
-              rows="4"
-              placeholder="Or paste custom SVG…"
-              oninput="updatePreview('${lSite}')"
-            ></textarea>
-            <div style="display:flex;gap:.5rem;margin-top:.5rem">
-              <button class="approve-btn"
-                      onclick="saveFavicon('${lSite}')">Save</button>
-              <button
-                style="padding:.3rem .8rem;border:1px solid #ddd;` +
-                `border-radius:4px;background:#fff;cursor:pointer;` +
-                `font-size:.8rem"
-                onclick="closeEdit('${lSite}')">Cancel</button>
-            </div>
-            <p id="err-${lSite}"
-               style="color:#c0392b;font-size:.8rem;margin:.4rem 0 0">
-            </p>
-          </div>
-          <img id="preview-${lSite}" width="80" height="80" alt="Preview"
-               style="border:1px solid #eee;border-radius:4px;` +
-                `flex-shrink:0;background:#fafafa">
-        </div>
-      </td>
-    </tr>`
+                `<tr id="row-${lSite}">` +
+                `<td><img id="thumb-${lSite}" src="${lThumbSrc}"` +
+                ` width="32" height="32" alt=""></td>` +
+                `<td><code>${escapeHtml(lSite)}</code></td>` +
+                `<td id="status-${lSite}">${lStatusHtml}</td>` +
+                `<td class="action-btns" id="actions-${lSite}">` +
+                `<button class="approve-btn"` +
+                ` onclick="openSitePicker('${lSite}')">Change</button>` +
+                `${lResetBtn}</td></tr>` +
+                `<tr id="picker-row-${lSite}" style="display:none">` +
+                `<td colspan="4"` +
+                ` style="padding:.5rem 1rem .75rem;background:#fafafa">` +
+                `<p style="font-size:.8rem;color:#888;margin:0 0 .5rem">` +
+                `Select a design for` +
+                ` <strong>${escapeHtml(lSite)}</strong>:</p>` +
+                `<div id="picker-grid-${lSite}" class="library-grid">` +
+                `<em style="color:#bbb;font-size:.8rem">Loading…</em>` +
+                `</div>` +
+                `<button style="margin-top:.4rem;padding:.25rem .6rem;` +
+                `font-size:.8rem;border:1px solid #ddd;border-radius:4px;` +
+                `background:#fff;cursor:pointer"` +
+                ` onclick="closePicker()">Cancel</button>` +
+                `</td></tr>`
             );
         })
         .join("");
 
-    const lGlobalResetBtn = lGlobalSvg
-        ? `\n      <button class="decline-btn" onclick="resetDefault(this)">` +
-          `Reset to fallback</button>`
-        : "";
-    const lGlobalStatusHtml = lGlobalSvg
+    const lGlobalStatus = lGlobalSvg
         ? `<span class="badge badge-custom">Custom</span>`
         : `<span class="badge badge-default">Hardcoded fallback</span>`;
-    const lDefaultCardHtml =
-        `<div class="add-form" style="margin-top:.75rem">` +
-        `\n  <h2>Platform default</h2>` +
-        `\n  <p style="color:#666;font-size:.85rem;margin:.25rem 0 .75rem">` +
-        `\n    Served to any site without a custom entry.` +
-        ` Key: <code>platform_favicon</code>` +
-        `\n  </p>` +
-        `\n  <div style="display:flex;gap:1rem;align-items:center">` +
-        `\n    <img id="default-thumb" src="/favicon.svg"` +
-        ` width="48" height="48" alt=""` +
-        `\n         style="border:1px solid #eee;border-radius:4px;` +
-        `background:#fafafa;flex-shrink:0">` +
-        `\n    <span id="default-status">${lGlobalStatusHtml}</span>` +
-        `\n    <div id="default-actions" class="action-btns">` +
-        `\n      <button class="approve-btn"` +
-        ` onclick="openDefaultEdit()">Edit</button>${lGlobalResetBtn}` +
-        `\n    </div>` +
-        `\n  </div>` +
-        `\n  <div id="default-edit-area"` +
-        ` style="display:none;margin-top:.75rem">` +
-        `\n    <div class="edit-area">` +
-        `\n      <div style="flex:1;min-width:0">` +
-        `\n        <div class="favicon-picker" id="picker-default"></div>` +
-        `\n        <textarea id="default-svg-input" class="svg-textarea"` +
-        ` rows="4" placeholder="Or paste custom SVG…"` +
-        `\n                  oninput="updateDefaultPreview()"></textarea>` +
-        `\n        <div style="display:flex;gap:.5rem;margin-top:.5rem">` +
-        `\n          <button class="approve-btn"` +
-        ` onclick="saveDefault()">Save</button>` +
-        `\n          <button style="padding:.3rem .8rem;border:1px solid #ddd;` +
-        `border-radius:4px;background:#fff;cursor:pointer;font-size:.8rem"` +
-        `\n            onclick="closeDefaultEdit()">Cancel</button>` +
-        `\n        </div>` +
-        `\n        <p id="default-err"` +
-        ` style="color:#c0392b;font-size:.8rem;margin:.4rem 0 0"></p>` +
-        `\n      </div>` +
-        `\n      <img id="default-preview" width="80" height="80"` +
-        ` alt="Preview" style="border:1px solid #eee;border-radius:4px;` +
-        `flex-shrink:0;background:#fafafa">` +
-        `\n    </div>` +
-        `\n  </div>` +
-        `\n</div>`;
+    const lGlobalReset = lGlobalSvg
+        ? `<button class="decline-btn" onclick="resetDefault(this)">` +
+          `Reset to fallback</button>`
+        : "";
 
     return c.html(
         `<!DOCTYPE html>
@@ -1127,13 +1023,70 @@ app.get("/favicon", async (c) => {
 </head>
 <body>
 ${nav("favicon")}
-<h1>Favicons <span style="font-weight:400;color:#888;font-size:.85rem">${lCustomSites.length} custom</span></h1>
-<p class="subtitle">
-  Per-site icons served at
-  <code>coull.ai/favicon.svg?site=…</code>
-</p>
-${lDefaultCardHtml}
-<div class="table-wrap" style="margin-top:1.5rem;min-height:45vh;overflow-y:auto">
+<h1>Favicons <span id="lib-count"
+  style="font-size:.6em;color:#999;font-weight:400"></span></h1>
+<p class="subtitle">Per-site icons served at
+  <code>coull.ai/favicon.svg?site=…</code></p>
+
+<div class="add-form">
+  <h2>Design library</h2>
+  <p style="color:#666;font-size:.85rem;margin:.2rem 0 .75rem">
+    Upload SVG designs here — click one under a site to assign it.
+  </p>
+  <div id="library-grid" class="library-grid">
+    <em style="color:#bbb;font-size:.8rem">Loading…</em>
+  </div>
+  <div class="upload-row">
+    <input type="text" id="design-name"
+           placeholder="design name (e.g. pride)" maxlength="63"
+           style="width:180px;padding:.4rem .6rem;
+                  border:1px solid #ddd;border-radius:6px;
+                  font-size:.85rem">
+    <label style="cursor:pointer">
+      <input type="file" id="design-file"
+             accept=".svg,image/svg+xml" style="display:none">
+      <span class="file-btn">Choose SVG</span>
+    </label>
+    <img id="upload-preview" width="40" height="40" alt=""
+         style="border:1px solid #eee;border-radius:4px;
+                background:#fafafa;display:none">
+    <button class="approve-btn" onclick="uploadDesign()">
+      Save design</button>
+    <span id="upload-err"
+          style="color:#c0392b;font-size:.8rem"></span>
+  </div>
+</div>
+
+<div class="add-form" style="margin-top:.75rem">
+  <h2>Platform default</h2>
+  <div style="display:flex;gap:1rem;align-items:center;flex-wrap:wrap">
+    <img id="default-thumb" src="/favicon.svg?t=${Date.now()}"
+         width="40" height="40" alt=""
+         style="border:1px solid #eee;border-radius:4px;
+                background:#fafafa;flex-shrink:0">
+    <span id="default-status">${lGlobalStatus}</span>
+    <div id="default-actions"
+         style="display:flex;gap:.5rem;flex-wrap:wrap">
+      <button class="approve-btn" onclick="openDefaultPicker()">
+        Change</button>
+      ${lGlobalReset}
+    </div>
+  </div>
+  <div id="default-picker" style="display:none;margin-top:.75rem">
+    <p style="font-size:.8rem;color:#888;margin:0 0 .5rem">
+      Select a design for the platform default (used when no
+      per-site design is set):</p>
+    <div id="default-picker-grid" class="library-grid">
+      <em style="color:#bbb;font-size:.8rem">Loading…</em></div>
+    <button style="margin-top:.4rem;padding:.25rem .6rem;
+                   font-size:.8rem;border:1px solid #ddd;
+                   border-radius:4px;background:#fff;cursor:pointer"
+            onclick="closePicker()">Cancel</button>
+  </div>
+</div>
+
+<div class="table-wrap"
+     style="margin-top:.75rem;min-height:40vh;overflow-y:auto">
   <table>
     <thead>
       <tr>
@@ -1144,252 +1097,307 @@ ${lDefaultCardHtml}
   </table>
 </div>
 
-<div class="add-form" style="flex-shrink:0">
-  <h2>Add site</h2>
-  <div class="favicon-picker" id="picker-new"></div>
-  <div class="add-form-row" style="margin-top:.5rem">
-    <div>
-      <input type="text" id="new-site-name"
-             placeholder="subdomain" maxlength="63"
-             pattern="[a-z0-9\\-]+"
-             title="Lowercase letters, digits, hyphens only">
-    </div>
-    <div style="flex:1;min-width:0">
-      <textarea id="new-svg-input" class="svg-textarea" rows="4"
-                placeholder="Or paste custom SVG…"
-                oninput="updateNewPreview()"></textarea>
-    </div>
-    <img id="new-preview" width="80" height="80" alt="Preview"
-         style="border:1px solid #eee;border-radius:4px;` +
-            `flex-shrink:0;background:#fafafa">
-  </div>
-  <div style="display:flex;gap:.5rem;margin-top:.75rem;align-items:center">
-    <button class="approve-btn" onclick="addSite()">Add</button>
-    <p id="add-err"
-       style="color:#c0392b;font-size:.8rem;margin:0"></p>
-  </div>
-</div>
-
 <script>
-  var KNOWN_SITES = ${JSON.stringify([...KNOWN_SITES])};
-  var DEFAULT_STORED_SVG = ${JSON.stringify(lGlobalSvg ?? "")};
-  var FAVICON_PRESETS = ${safeJson(
-      FAVICON_PRESETS.map((lP) => ({ label: lP.label, svg: lP.svg })),
-  )};
-  var STORED_FAVICONS = ${safeJson(Object.fromEntries(lSvgMap))};
+var knownSites = ${JSON.stringify([...KNOWN_SITES])};
+var library = [];
+var activePicker = null;
+var currentPickerSite = null;
 
-  var pickerData = {};
-
-  function renderPicker(pickerId, textareaId, kind, kindArg, currentSvg) {
-    var options = [];
-    FAVICON_PRESETS.forEach(function(p) {
-      options.push({ label: p.label, svg: p.svg });
-    });
-    Object.keys(STORED_FAVICONS).forEach(function(s) {
-      if (s === kindArg) return;
-      options.push({ label: s, svg: STORED_FAVICONS[s] });
-    });
-    pickerData[pickerId] = options;
-    var html = options.map(function(opt, i) {
-      var thumb = 'data:image/svg+xml,' + encodeURIComponent(opt.svg);
-      var sel = opt.svg === currentSvg ? ' selected' : '';
-      return '<button class="pick-btn' + sel + '"'
-        + ' onclick="pickFavicon(\'' + pickerId + '\',\'' + textareaId
-        + '\',\'' + kind + '\',\'' + kindArg + '\',' + i + ',this)">'
-        + '<img src="' + thumb + '" width="32" height="32" alt="">'
-        + '<span>' + opt.label + '</span>'
-        + '</button>';
-    }).join('');
-    document.getElementById(pickerId).innerHTML = html;
+async function loadLibrary() {
+  var res = await fetch('/api/admin/favicon-library');
+  if (!res.ok) return;
+  library = await res.json();
+  var cnt = document.getElementById('lib-count');
+  if (cnt) {
+    var n = library.length;
+    cnt.textContent = '('
+      + n + ' design' + (n !== 1 ? 's' : '') + ')';
   }
+  renderLibraryGrid();
+}
 
-  function pickFavicon(pickerId, textareaId, kind, kindArg, idx, btn) {
-    var svg = pickerData[pickerId][idx].svg;
-    document.getElementById(textareaId).value = svg;
-    if (kind === 'site') updatePreview(kindArg);
-    else if (kind === 'new') updateNewPreview();
-    else updateDefaultPreview();
-    document.getElementById(pickerId)
-      .querySelectorAll('.pick-btn')
-      .forEach(function(b) { b.classList.remove('selected'); });
-    btn.classList.add('selected');
+function svgThumb(svg) {
+  return 'data:image/svg+xml,' + encodeURIComponent(svg);
+}
+
+function renderLibraryGrid() {
+  var grid = document.getElementById('library-grid');
+  if (!library.length) {
+    grid.onclick = null;
+    grid.innerHTML = '<p style="color:#888;font-size:.85rem;margin:0">'
+      + 'No designs yet — upload one using the form above.</p>';
+    return;
   }
-
-  // ── Per-site edit ──────────────────────────────────────────────────────────
-
-  function openEdit(site) {
-    var row = document.getElementById('row-' + site);
-    var editRow = document.getElementById('edit-' + site);
-    var textarea = document.getElementById('svg-input-' + site);
-    var currentSvg = row.dataset.svg || '';
-    textarea.value = currentSvg;
-    editRow.style.display = '';
-    textarea.focus();
-    updatePreview(site);
-    try {
-      renderPicker(
-        'picker-' + site, 'svg-input-' + site, 'site', site, currentSvg
-      );
-    } catch (e) { console.error('picker error', e); }
-  }
-
-  function closeEdit(site) {
-    document.getElementById('edit-' + site).style.display = 'none';
-    document.getElementById('err-' + site).textContent = '';
-  }
-
-  function updatePreview(site) {
-    var svg = document.getElementById('svg-input-' + site).value.trim();
-    document.getElementById('preview-' + site).src = svg
-      ? 'data:image/svg+xml,' + encodeURIComponent(svg) : '';
-  }
-
-  async function saveFavicon(site) {
-    var svg = document.getElementById('svg-input-' + site).value.trim();
-    var errEl = document.getElementById('err-' + site);
-    errEl.textContent = '';
-    var res = await fetch('/api/admin/favicons/' + site, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain' },
-      body: svg,
-    });
-    var data = await res.json();
-    if (!res.ok) { errEl.textContent = data.error || 'Save failed'; return; }
-    var row = document.getElementById('row-' + site);
-    row.dataset.svg = svg;
-    document.getElementById('thumb-' + site).src =
-      '/favicon.svg?site=' + encodeURIComponent(site) + '&t=' + Date.now();
-    document.getElementById('status-' + site).innerHTML =
-      '<span class="badge badge-custom">Custom</span>';
-    var actionsEl = document.getElementById('actions-' + site);
-    if (!actionsEl.querySelector('.decline-btn')) {
-      var btn = document.createElement('button');
-      btn.className = 'decline-btn';
-      btn.setAttribute('onclick', "resetFavicon('" + site + "',this)");
-      btn.textContent = 'Reset';
-      actionsEl.appendChild(btn);
+  grid.innerHTML = library.map(function(d) {
+    return '<div class="design-card" data-name="' + d.name + '">'
+      + '<img src="' + svgThumb(d.svg) + '"'
+      + ' width="48" height="48" alt="">'
+      + '<span class="design-name">' + d.name + '</span>'
+      + '<button class="del-btn" title="Delete design">×</button>'
+      + '</div>';
+  }).join('');
+  grid.onclick = function(e) {
+    if (e.target.classList.contains('del-btn')) {
+      var card = e.target.closest('.design-card');
+      if (card) deleteDesign(card.getAttribute('data-name'));
     }
-    closeEdit(site);
+  };
+}
+
+function renderPickerGrid(gridId, callback) {
+  var grid = document.getElementById(gridId);
+  if (!grid) return;
+  grid.onclick = null;
+  if (!library.length) {
+    grid.innerHTML = '<p style="color:#888;font-size:.85rem;margin:0">'
+      + 'No designs in library — add one above first.</p>';
+    return;
   }
+  grid.innerHTML = library.map(function(d) {
+    return '<div class="design-card clickable"'
+      + ' data-name="' + d.name + '">'
+      + '<img src="' + svgThumb(d.svg) + '"'
+      + ' width="48" height="48" alt="">'
+      + '<span class="design-name">' + d.name + '</span>'
+      + '</div>';
+  }).join('');
+  grid.onclick = function(e) {
+    var card = e.target.closest('.clickable');
+    if (!card) return;
+    var n = card.getAttribute('data-name');
+    if (n) callback(n);
+  };
+}
 
-  async function resetFavicon(site, btn) {
-    if (!confirm('Reset ' + site + ' to the default favicon?')) return;
-    btn.disabled = true;
-    var res = await fetch('/api/admin/favicons/' + site, { method: 'DELETE' });
-    if (!res.ok) { btn.disabled = false; return; }
-    if (KNOWN_SITES.indexOf(site) === -1) {
-      document.getElementById('row-' + site).remove();
-      document.getElementById('edit-' + site).remove();
-      return;
-    }
-    var row = document.getElementById('row-' + site);
-    row.dataset.svg = '';
-    document.getElementById('thumb-' + site).src =
-      '/favicon.svg?site=' + encodeURIComponent(site) + '&t=' + Date.now();
-    document.getElementById('status-' + site).innerHTML =
-      '<span class="badge badge-default">Default</span>';
-    btn.remove();
+document.getElementById('design-file')
+  .addEventListener('change', function(e) {
+    var file = e.target.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function(ev) {
+      var content = ev.target.result || '';
+      var prev = document.getElementById('upload-preview');
+      prev.style.display = content ? '' : 'none';
+      prev.src = content
+        ? 'data:image/svg+xml,' + encodeURIComponent(content) : '';
+    };
+    reader.readAsText(file);
+  });
+
+async function uploadDesign() {
+  var name = document.getElementById('design-name')
+    .value.trim().toLowerCase();
+  var errEl = document.getElementById('upload-err');
+  errEl.textContent = '';
+  if (!/^[a-z0-9-]{1,63}$/.test(name)) {
+    errEl.textContent = 'Name: lowercase letters, digits, hyphens only';
+    return;
   }
-
-  function updateNewPreview() {
-    var svg = document.getElementById('new-svg-input').value.trim();
-    document.getElementById('new-preview').src = svg
-      ? 'data:image/svg+xml,' + encodeURIComponent(svg) : '';
+  var file = document.getElementById('design-file').files[0];
+  if (!file) {
+    errEl.textContent = 'Choose an SVG file first';
+    return;
   }
-
-  async function addSite() {
-    var site = document.getElementById('new-site-name')
-      .value.trim().toLowerCase();
-    var svg = document.getElementById('new-svg-input').value.trim();
-    var errEl = document.getElementById('add-err');
-    errEl.textContent = '';
-    if (!/^[a-z0-9-]{1,63}$/.test(site)) {
-      errEl.textContent =
-        'Invalid name — lowercase letters, digits, hyphens, 1-63 chars';
-      return;
-    }
-    if (!svg) { errEl.textContent = 'SVG is required'; return; }
-    var res = await fetch('/api/admin/favicons/' + site, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain' },
-      body: svg,
-    });
-    var data = await res.json();
-    if (!res.ok) { errEl.textContent = data.error || 'Save failed'; return; }
-    window.location.reload();
+  var svg = await file.text();
+  var res = await fetch('/api/admin/favicon-library/' + name, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain' },
+    body: svg,
+  });
+  var data = await res.json();
+  if (!res.ok) {
+    errEl.textContent = data.error || 'Save failed';
+    return;
   }
+  document.getElementById('design-name').value = '';
+  document.getElementById('design-file').value = '';
+  document.getElementById('upload-preview').style.display = 'none';
+  await loadLibrary();
+}
 
-  // ── Platform default ───────────────────────────────────────────────────────
+async function deleteDesign(name) {
+  if (!confirm('Delete design "' + name + '"?')) return;
+  await fetch('/api/admin/favicon-library/' + name, { method: 'DELETE' });
+  await loadLibrary();
+}
 
-  function openDefaultEdit() {
-    var ta = document.getElementById('default-svg-input');
-    ta.value = DEFAULT_STORED_SVG;
-    updateDefaultPreview();
-    renderPicker(
-      'picker-default', 'default-svg-input', 'default', '',
-      DEFAULT_STORED_SVG
-    );
-    document.getElementById('default-edit-area').style.display = '';
-    ta.focus();
+function closePicker() {
+  if (!activePicker) return;
+  if (activePicker === 'default') {
+    document.getElementById('default-picker').style.display = 'none';
+  } else {
+    var site = activePicker.slice(5);
+    document.getElementById('picker-row-' + site).style.display = 'none';
   }
+  activePicker = null;
+  currentPickerSite = null;
+}
 
-  function closeDefaultEdit() {
-    document.getElementById('default-edit-area').style.display = 'none';
-    document.getElementById('default-err').textContent = '';
+function openSitePicker(site) {
+  closePicker();
+  currentPickerSite = site;
+  activePicker = 'site:' + site;
+  var row = document.getElementById('picker-row-' + site);
+  row.style.display = '';
+  renderPickerGrid('picker-grid-' + site, function(designName) {
+    var entry = library.find(function(d) { return d.name === designName; });
+    if (entry) assignDesign(site, entry.svg);
+  });
+  row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function openDefaultPicker() {
+  closePicker();
+  activePicker = 'default';
+  document.getElementById('default-picker').style.display = '';
+  renderPickerGrid('default-picker-grid', function(designName) {
+    var entry = library.find(function(d) { return d.name === designName; });
+    if (entry) assignDefault(entry.svg);
+  });
+}
+
+async function assignDesign(site, svg) {
+  var res = await fetch(
+    '/api/admin/favicons/' + encodeURIComponent(site),
+    { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: svg },
+  );
+  if (!res.ok) return;
+  var t = Date.now();
+  document.getElementById('thumb-' + site).src =
+    '/favicon.svg?site=' + encodeURIComponent(site) + '&t=' + t;
+  document.getElementById('status-' + site).innerHTML =
+    '<span class="badge badge-custom">Custom</span>';
+  var actEl = document.getElementById('actions-' + site);
+  if (!actEl.querySelector('.decline-btn')) {
+    var btn = document.createElement('button');
+    btn.className = 'decline-btn';
+    btn.textContent = 'Reset';
+    btn.onclick = function() { resetSite(site, btn); };
+    actEl.appendChild(btn);
   }
+  closePicker();
+}
 
-  function updateDefaultPreview() {
-    var svg = document.getElementById('default-svg-input').value.trim();
-    document.getElementById('default-preview').src = svg
-      ? 'data:image/svg+xml,' + encodeURIComponent(svg) : '';
+async function resetSite(site, btn) {
+  if (!confirm('Reset ' + site + ' to the platform default?')) return;
+  btn.disabled = true;
+  var res = await fetch(
+    '/api/admin/favicons/' + encodeURIComponent(site),
+    { method: 'DELETE' },
+  );
+  if (!res.ok) { btn.disabled = false; return; }
+  document.getElementById('thumb-' + site).src =
+    '/favicon.svg?site=' + encodeURIComponent(site) + '&t=' + Date.now();
+  document.getElementById('status-' + site).innerHTML =
+    '<span class="badge badge-default">Default</span>';
+  btn.remove();
+  if (knownSites.indexOf(site) === -1) {
+    document.getElementById('row-' + site).remove();
+    document.getElementById('picker-row-' + site).remove();
   }
+}
 
-  async function saveDefault() {
-    var svg = document.getElementById('default-svg-input').value.trim();
-    var errEl = document.getElementById('default-err');
-    errEl.textContent = '';
-    var res = await fetch('/api/admin/favicon/default', {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain' },
-      body: svg,
-    });
-    var data = await res.json();
-    if (!res.ok) { errEl.textContent = data.error || 'Save failed'; return; }
-    DEFAULT_STORED_SVG = svg;
-    var t = Date.now();
-    document.getElementById('default-thumb').src = '/favicon.svg?t=' + t;
-    document.getElementById('default-status').innerHTML =
-      '<span class="badge badge-custom">Custom</span>';
-    var actEl = document.getElementById('default-actions');
-    if (!actEl.querySelector('.decline-btn')) {
-      var btn = document.createElement('button');
-      btn.className = 'decline-btn';
-      btn.setAttribute('onclick', 'resetDefault(this)');
-      btn.textContent = 'Reset to fallback';
-      actEl.appendChild(btn);
-    }
-    document.querySelectorAll('[id^="thumb-"]').forEach(function(img) {
-      var site = img.id.slice('thumb-'.length);
-      var row = document.getElementById('row-' + site);
-      if (row && !row.dataset.svg)
-        img.src = '/favicon.svg?site=' + encodeURIComponent(site) + '&t=' + t;
-    });
-    closeDefaultEdit();
+async function assignDefault(svg) {
+  var res = await fetch('/api/admin/favicon/default', {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain' },
+    body: svg,
+  });
+  if (!res.ok) return;
+  document.getElementById('default-thumb').src =
+    '/favicon.svg?t=' + Date.now();
+  document.getElementById('default-status').innerHTML =
+    '<span class="badge badge-custom">Custom</span>';
+  var actEl = document.getElementById('default-actions');
+  if (!actEl.querySelector('.decline-btn')) {
+    var btn = document.createElement('button');
+    btn.className = 'decline-btn';
+    btn.textContent = 'Reset to fallback';
+    btn.onclick = function() { resetDefault(btn); };
+    actEl.appendChild(btn);
   }
+  closePicker();
+}
 
-  async function resetDefault(btn) {
-    if (!confirm('Reset platform default to the hardcoded fallback?')) return;
-    btn.disabled = true;
-    var res = await fetch('/api/admin/favicon/default', { method: 'DELETE' });
-    if (!res.ok) { btn.disabled = false; return; }
-    window.location.reload();
-  }
+async function resetDefault(btn) {
+  if (!confirm('Reset platform default to the hardcoded fallback?')) return;
+  btn.disabled = true;
+  var res = await fetch('/api/admin/favicon/default', { method: 'DELETE' });
+  if (!res.ok) { btn.disabled = false; return; }
+  window.location.reload();
+}
 
-  renderPicker('picker-new', 'new-svg-input', 'new', '', '');
+loadLibrary();
 </script>
 </body>
 </html>`,
     );
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/admin/favicon-library — list all named SVG designs (owner-only)
+// ---------------------------------------------------------------------------
+
+app.get("/api/admin/favicon-library", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    const lList = await c.env.PLATFORM_ASSETS.list({
+        prefix: "platform_favicon_library:",
+    });
+    const lEntries = await Promise.all(
+        lList.keys.map(async (k) => {
+            const lSvg = await c.env.PLATFORM_ASSETS.get(k.name);
+            return {
+                name: k.name.slice("platform_favicon_library:".length),
+                svg: lSvg ?? "",
+            };
+        }),
+    );
+    return c.json(
+        lEntries
+            .filter((e) => e.svg !== "")
+            .sort((a, b) => a.name.localeCompare(b.name)),
+    );
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/favicon-library/:name — save SVG design (owner-only)
+// ---------------------------------------------------------------------------
+
+app.post("/api/admin/favicon-library/:name", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    const lName = c.req.param("name");
+    if (!LIBRARY_NAME_RE.test(lName))
+        return c.json({ error: "Invalid design name" }, 400);
+
+    const lRaw = await c.req.text();
+    const lResult = validateSvg(lRaw);
+    if (!lResult.ok) return c.json({ error: lResult.error }, 400);
+
+    await c.env.PLATFORM_ASSETS.put(
+        `platform_favicon_library:${lName}`,
+        lResult.svg,
+    );
+    return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// DELETE /api/admin/favicon-library/:name — remove SVG design (owner-only)
+// ---------------------------------------------------------------------------
+
+app.delete("/api/admin/favicon-library/:name", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    const lName = c.req.param("name");
+    if (!LIBRARY_NAME_RE.test(lName))
+        return c.json({ error: "Invalid design name" }, 400);
+
+    await c.env.PLATFORM_ASSETS.delete(`platform_favicon_library:${lName}`);
+    return c.json({ ok: true });
 });
 
 // ---------------------------------------------------------------------------

@@ -442,6 +442,7 @@ tr:last-child td { border-bottom: none; }
 }
 .design-card.clickable { cursor: pointer; }
 .design-card.clickable:hover { border-color: #111; }
+.design-card.selected { border-color: #111; box-shadow: 0 0 0 2px #111; }
 .design-name {
   font-size: .75rem; color: #555; text-align: center;
   max-width: 80px; overflow: hidden; text-overflow: ellipsis;
@@ -989,16 +990,22 @@ app.get("/favicon", async (c) => {
                 `<tr id="picker-row-${lSite}" style="display:none">` +
                 `<td colspan="4"` +
                 ` style="padding:.5rem 1rem .75rem;background:#fafafa">` +
-                `<p style="font-size:.8rem;color:#888;margin:0 0 .5rem">` +
+                `<p style="font-size:.8rem;color:#888;margin:0 0 .25rem">` +
                 `Select a design for` +
                 ` <strong>${escapeHtml(lSite)}</strong>:</p>` +
+                `<p style="font-size:.75rem;color:#bbb;margin:0 0 .5rem">` +
+                `Changes may take time to appear in browser tabs` +
+                ` due to favicon caching.</p>` +
                 `<div id="picker-grid-${lSite}" class="library-grid">` +
                 `<em style="color:#bbb;font-size:.8rem">Loading…</em>` +
                 `</div>` +
-                `<button style="margin-top:.4rem;padding:.25rem .6rem;` +
-                `font-size:.8rem;border:1px solid #ddd;border-radius:4px;` +
-                `background:#fff;cursor:pointer"` +
-                ` onclick="closePicker()">Cancel</button>` +
+                `<div style="display:flex;gap:.5rem;margin-top:.5rem">` +
+                `<button id="confirm-${lSite}" class="approve-btn"` +
+                ` disabled>Confirm</button>` +
+                `<button style="padding:.25rem .6rem;font-size:.8rem;` +
+                `border:1px solid #ddd;border-radius:4px;background:#fff;` +
+                `cursor:pointer" onclick="closePicker()">Cancel</button>` +
+                `</div>` +
                 `</td></tr>`
             );
         })
@@ -1073,15 +1080,22 @@ ${nav("favicon")}
     </div>
   </div>
   <div id="default-picker" style="display:none;margin-top:.75rem">
-    <p style="font-size:.8rem;color:#888;margin:0 0 .5rem">
+    <p style="font-size:.8rem;color:#888;margin:0 0 .25rem">
       Select a design for the platform default (used when no
       per-site design is set):</p>
+    <p style="font-size:.75rem;color:#bbb;margin:0 0 .5rem">
+      Changes may take time to appear in browser tabs due to
+      favicon caching.</p>
     <div id="default-picker-grid" class="library-grid">
       <em style="color:#bbb;font-size:.8rem">Loading…</em></div>
-    <button style="margin-top:.4rem;padding:.25rem .6rem;
-                   font-size:.8rem;border:1px solid #ddd;
-                   border-radius:4px;background:#fff;cursor:pointer"
-            onclick="closePicker()">Cancel</button>
+    <div style="display:flex;gap:.5rem;margin-top:.5rem">
+      <button id="confirm-default" class="approve-btn"
+              disabled>Confirm</button>
+      <button style="padding:.25rem .6rem;font-size:.8rem;
+                     border:1px solid #ddd;border-radius:4px;
+                     background:#fff;cursor:pointer"
+              onclick="closePicker()">Cancel</button>
+    </div>
   </div>
 </div>
 
@@ -1138,10 +1152,13 @@ function renderLibraryGrid() {
   };
 }
 
-function renderPickerGrid(gridId, callback) {
+function renderPickerGrid(gridId, confirmBtnId, callback) {
   var grid = document.getElementById(gridId);
+  var confirmBtn = document.getElementById(confirmBtnId);
   if (!grid) return;
+  var lSelected = null;
   grid.onclick = null;
+  if (confirmBtn) { confirmBtn.disabled = true; confirmBtn.onclick = null; }
   if (!library.length) {
     grid.innerHTML = '<p style="color:#888;font-size:.85rem;margin:0">'
       + 'No designs in library — add one above first.</p>';
@@ -1159,8 +1176,19 @@ function renderPickerGrid(gridId, callback) {
     var card = e.target.closest('.clickable');
     if (!card) return;
     var n = card.getAttribute('data-name');
-    if (n) callback(n);
+    if (!n) return;
+    grid.querySelectorAll('.design-card').forEach(function(c) {
+      c.classList.remove('selected');
+    });
+    card.classList.add('selected');
+    lSelected = n;
+    if (confirmBtn) confirmBtn.disabled = false;
   };
+  if (confirmBtn) {
+    confirmBtn.onclick = function() {
+      if (lSelected) callback(lSelected);
+    };
+  }
 }
 
 document.getElementById('design-file')
@@ -1243,10 +1271,11 @@ function openSitePicker(site) {
   activePicker = 'site:' + site;
   var row = document.getElementById('picker-row-' + site);
   row.style.display = '';
-  renderPickerGrid('picker-grid-' + site, function(designName) {
-    var entry = library.find(function(d) { return d.name === designName; });
-    if (entry) assignDesign(site, entry.svg);
-  });
+  renderPickerGrid('picker-grid-' + site, 'confirm-' + site,
+    function(designName) {
+      var entry = library.find(function(d) { return d.name === designName; });
+      if (entry) assignDesign(site, entry.svg);
+    });
   row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
@@ -1254,10 +1283,11 @@ function openDefaultPicker() {
   closePicker();
   activePicker = 'default';
   document.getElementById('default-picker').style.display = '';
-  renderPickerGrid('default-picker-grid', function(designName) {
-    var entry = library.find(function(d) { return d.name === designName; });
-    if (entry) assignDefault(entry.svg);
-  });
+  renderPickerGrid('default-picker-grid', 'confirm-default',
+    function(designName) {
+      var entry = library.find(function(d) { return d.name === designName; });
+      if (entry) assignDefault(entry.svg);
+    });
 }
 
 async function assignDesign(site, svg) {

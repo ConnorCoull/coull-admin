@@ -446,6 +446,19 @@ tr:last-child td { border-bottom: none; }
   display: inline-flex; align-items: center; flex-shrink: 0;
 }
 .eye-btn:hover { color: #111; }
+/* ── Preset strip ── */
+.preset-strip {
+  display: flex; align-items: center; gap: .4rem;
+  margin: .4rem 0; flex-wrap: wrap;
+}
+.preset-label { font-size: .78rem; color: #888; flex-shrink: 0; }
+.preset-btn {
+  display: inline-flex; align-items: center; gap: .3rem;
+  padding: .2rem .45rem; border: 1px solid #ddd; border-radius: 4px;
+  background: #fafafa; cursor: pointer; font-size: .78rem; color: #555;
+}
+.preset-btn:hover { background: #f0f0f0; border-color: #bbb; color: #111; }
+.preset-btn img { border-radius: 2px; display: block; }
 `;
 
 // Inline SVG icons for the email reveal toggle button.
@@ -483,6 +496,55 @@ function emailCellHtml(xiEmail: string): string {
 }
 
 const KNOWN_SITES = ["coull", "admin", "auth", "flashcards"] as const;
+
+const FAVICON_PRESETS: { label: string; svg: string }[] = [
+    {
+        label: "Default",
+        svg: FALLBACK_SVG,
+    },
+    {
+        label: "Heve Monet",
+        svg:
+            `<svg width="801" height="800" viewBox="0 0 801 800"` +
+            ` fill="none" xmlns="http://www.w3.org/2000/svg">` +
+            `<path d="M1 550H801V800H251L1 550Z" fill="#383127"/>` +
+            `<path d="M1 550L0 249L251 0L251 800L1 550Z" fill="#6F5129"/>` +
+            `<path d="M250.065 0H801V250H1L250.065 0Z" fill="#73422E"/>` +
+            `</svg>`,
+    },
+];
+
+/**
+ * Inputs: textarea DOM id, kind ('site'|'new'|'default'), kindArg (site name).
+ * Outputs: HTML string for the preset picker strip.
+ * Logic: renders one button per preset; clicking applies SVG to the textarea.
+ */
+function presetStripHtml(
+    xiTextareaId: string,
+    xiKind: "site" | "new" | "default",
+    xiKindArg: string,
+): string {
+    if (FAVICON_PRESETS.length === 0) return "";
+    const lBtns = FAVICON_PRESETS.map((lP, lI) => {
+        const lThumb = `data:image/svg+xml,${encodeURIComponent(lP.svg)}`;
+        const lOnclick =
+            `applyPreset('${escapeHtml(xiTextareaId)}',` +
+            `'${xiKind}','${escapeHtml(xiKindArg)}',${lI})`;
+        return (
+            `<button class="preset-btn" onclick="${lOnclick}"` +
+            ` title="${escapeHtml(lP.label)}">` +
+            `<img src="${lThumb}" width="20" height="20" alt="">` +
+            ` ${escapeHtml(lP.label)}` +
+            `</button>`
+        );
+    }).join("");
+    return (
+        `<div class="preset-strip">` +
+        `<span class="preset-label">Presets:</span>${lBtns}` +
+        `</div>`
+    );
+}
+
 const SITE_RE = /^[a-z0-9-]{1,63}$/;
 
 /**
@@ -994,6 +1056,7 @@ app.get("/favicon", async (c) => {
               placeholder="Paste SVG here…"
               oninput="updatePreview('${lSite}')"
             ></textarea>
+            ${presetStripHtml(`svg-input-${lSite}`, "site", lSite)}
             <div style="display:flex;gap:.5rem;margin-top:.5rem">
               <button class="approve-btn"
                       onclick="saveFavicon('${lSite}')">Save</button>
@@ -1049,6 +1112,7 @@ app.get("/favicon", async (c) => {
         `\n        <textarea id="default-svg-input" class="svg-textarea"` +
         ` rows="8" placeholder="Paste SVG here…"` +
         `\n                  oninput="updateDefaultPreview()"></textarea>` +
+        `\n        ${presetStripHtml("default-svg-input", "default", "")}` +
         `\n        <div style="display:flex;gap:.5rem;margin-top:.5rem">` +
         `\n          <button class="approve-btn"` +
         ` onclick="saveDefault()">Save</button>` +
@@ -1108,6 +1172,7 @@ ${lDefaultCardHtml}
       <textarea id="new-svg-input" class="svg-textarea" rows="6"
                 placeholder="Paste SVG here…"
                 oninput="updateNewPreview()"></textarea>
+      ${presetStripHtml("new-svg-input", "new", "")}
     </div>
     <img id="new-preview" width="80" height="80" alt="Preview"
          style="border:1px solid #eee;border-radius:4px;` +
@@ -1123,6 +1188,9 @@ ${lDefaultCardHtml}
 <script>
   var KNOWN_SITES = ${JSON.stringify([...KNOWN_SITES])};
   var DEFAULT_STORED_SVG = ${JSON.stringify(lGlobalSvg ?? "")};
+  var FAVICON_PRESETS = ${JSON.stringify(
+      FAVICON_PRESETS.map((lP) => ({ label: lP.label, svg: lP.svg })),
+  )};
 
   // ── Per-site edit ──────────────────────────────────────────────────────────
 
@@ -1145,6 +1213,13 @@ ${lDefaultCardHtml}
     var svg = document.getElementById('svg-input-' + site).value.trim();
     document.getElementById('preview-' + site).src = svg
       ? 'data:image/svg+xml,' + encodeURIComponent(svg) : '';
+  }
+
+  function applyPreset(textareaId, kind, kindArg, idx) {
+    document.getElementById(textareaId).value = FAVICON_PRESETS[idx].svg;
+    if (kind === 'site') updatePreview(kindArg);
+    else if (kind === 'new') updateNewPreview();
+    else updateDefaultPreview();
   }
 
   async function saveFavicon(site) {

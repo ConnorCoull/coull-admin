@@ -44,22 +44,19 @@ const FALLBACK_SVG =
     `</svg>`;
 
 app.get("/favicon.svg", async (c) => {
+    const lHost = c.req.header("host") ?? "";
+    const lSite = c.req.query("site") ?? lHost.split(".")[0];
+    let lSvg = FALLBACK_SVG;
     try {
-        const lHost = c.req.header("host") ?? "";
-        const lSite = lHost.split(".")[0];
-        const lResponse = await fetch(
-            `https://coull.ai/favicon.svg?site=${lSite}`,
-        );
-        if (lResponse.ok) {
-            return new Response(lResponse.body, {
-                headers: {
-                    "Content-Type": "image/svg+xml",
-                    "Cache-Control": "public, max-age=3600",
-                },
-            });
-        }
+        lSvg =
+            (await c.env.PLATFORM_ASSETS.get(`platform_favicon:${lSite}`)) ??
+            (await c.env.PLATFORM_ASSETS.get("platform_favicon")) ??
+            FALLBACK_SVG;
     } catch {}
-    return c.body(FALLBACK_SVG, 200, { "Content-Type": "image/svg+xml" });
+    return c.body(lSvg, 200, {
+        "Content-Type": "image/svg+xml",
+        "Cache-Control": "public, max-age=3600",
+    });
 });
 
 app.get("/favicon.ico", (c) => c.redirect("/favicon.svg", 302));
@@ -957,8 +954,10 @@ app.get("/favicon", async (c) => {
         }),
     );
 
+    const lGlobalSvg = await c.env.PLATFORM_ASSETS.get("platform_favicon");
+    const lDefaultSvg = lGlobalSvg ?? FALLBACK_SVG;
     const lDefaultDataUrl = `data:image/svg+xml,${encodeURIComponent(
-        FALLBACK_SVG,
+        lDefaultSvg,
     )}`;
 
     const lRowsHtml = lAllSites
@@ -1024,6 +1023,55 @@ app.get("/favicon", async (c) => {
         })
         .join("");
 
+    const lGlobalResetBtn = lGlobalSvg
+        ? `\n      <button class="decline-btn" onclick="resetDefault(this)">` +
+          `Reset to fallback</button>`
+        : "";
+    const lGlobalStatusHtml = lGlobalSvg
+        ? `<span class="badge badge-custom">Custom</span>`
+        : `<span class="badge badge-default">Hardcoded fallback</span>`;
+    const lDefaultCardHtml =
+        `<div class="add-form" style="margin-top:.75rem">` +
+        `\n  <h2>Platform default</h2>` +
+        `\n  <p style="color:#666;font-size:.85rem;margin:.25rem 0 .75rem">` +
+        `\n    Served to any site without a custom entry.` +
+        ` Key: <code>platform_favicon</code>` +
+        `\n  </p>` +
+        `\n  <div style="display:flex;gap:1rem;align-items:center">` +
+        `\n    <img id="default-thumb" src="${lDefaultDataUrl}"` +
+        ` width="48" height="48" alt=""` +
+        `\n         style="border:1px solid #eee;border-radius:4px;` +
+        `background:#fafafa;flex-shrink:0">` +
+        `\n    <span id="default-status">${lGlobalStatusHtml}</span>` +
+        `\n    <div id="default-actions" class="action-btns">` +
+        `\n      <button class="approve-btn"` +
+        ` onclick="openDefaultEdit()">Edit</button>${lGlobalResetBtn}` +
+        `\n    </div>` +
+        `\n  </div>` +
+        `\n  <div id="default-edit-area"` +
+        ` style="display:none;margin-top:.75rem">` +
+        `\n    <div class="edit-area">` +
+        `\n      <div style="flex:1;min-width:0">` +
+        `\n        <textarea id="default-svg-input" class="svg-textarea"` +
+        ` rows="8" placeholder="Paste SVG here…"` +
+        `\n                  oninput="updateDefaultPreview()"></textarea>` +
+        `\n        <div style="display:flex;gap:.5rem;margin-top:.5rem">` +
+        `\n          <button class="approve-btn"` +
+        ` onclick="saveDefault()">Save</button>` +
+        `\n          <button style="padding:.3rem .8rem;border:1px solid #ddd;` +
+        `border-radius:4px;background:#fff;cursor:pointer;font-size:.8rem"` +
+        `\n            onclick="closeDefaultEdit()">Cancel</button>` +
+        `\n        </div>` +
+        `\n        <p id="default-err"` +
+        ` style="color:#c0392b;font-size:.8rem;margin:.4rem 0 0"></p>` +
+        `\n      </div>` +
+        `\n      <img id="default-preview" width="80" height="80"` +
+        ` alt="Preview" style="border:1px solid #eee;border-radius:4px;` +
+        `flex-shrink:0;background:#fafafa">` +
+        `\n    </div>` +
+        `\n  </div>` +
+        `\n</div>`;
+
     return c.html(
         `<!DOCTYPE html>
 <html lang="en">
@@ -1039,9 +1087,10 @@ ${nav("favicon")}
 <h1>Favicons</h1>
 <p class="subtitle">
   Per-site icons served at
-  <code>coull.ai/favicon.svg?site=…</code>
+  <code>admin.coull.ai/favicon.svg?site=…</code>
 </p>
-<div class="table-wrap" style="margin-top:.75rem">
+${lDefaultCardHtml}
+<div class="table-wrap" style="margin-top:1.5rem">
   <table>
     <thead>
       <tr>
@@ -1079,6 +1128,10 @@ ${nav("favicon")}
 
 <script>
   var DEFAULT_DATA_URL = ${JSON.stringify(lDefaultDataUrl)};
+  var KNOWN_SITES = ${JSON.stringify([...KNOWN_SITES])};
+  var DEFAULT_STORED_SVG = ${JSON.stringify(lGlobalSvg ?? "")};
+
+  // ── Per-site edit ──────────────────────────────────────────────────────────
 
   function openEdit(site) {
     var row = document.getElementById('row-' + site);
@@ -1098,12 +1151,6 @@ ${nav("favicon")}
   function updatePreview(site) {
     var svg = document.getElementById('svg-input-' + site).value.trim();
     document.getElementById('preview-' + site).src = svg
-      ? 'data:image/svg+xml,' + encodeURIComponent(svg) : '';
-  }
-
-  function updateNewPreview() {
-    var svg = document.getElementById('new-svg-input').value.trim();
-    document.getElementById('new-preview').src = svg
       ? 'data:image/svg+xml,' + encodeURIComponent(svg) : '';
   }
 
@@ -1138,15 +1185,25 @@ ${nav("favicon")}
   async function resetFavicon(site, btn) {
     if (!confirm('Reset ' + site + ' to the default favicon?')) return;
     btn.disabled = true;
-    var res = await fetch('/api/admin/favicons/' + site,
-      { method: 'DELETE' });
+    var res = await fetch('/api/admin/favicons/' + site, { method: 'DELETE' });
     if (!res.ok) { btn.disabled = false; return; }
+    if (KNOWN_SITES.indexOf(site) === -1) {
+      document.getElementById('row-' + site).remove();
+      document.getElementById('edit-' + site).remove();
+      return;
+    }
     var row = document.getElementById('row-' + site);
     row.dataset.svg = '';
     document.getElementById('thumb-' + site).src = DEFAULT_DATA_URL;
     document.getElementById('status-' + site).innerHTML =
       '<span class="badge badge-default">Default</span>';
     btn.remove();
+  }
+
+  function updateNewPreview() {
+    var svg = document.getElementById('new-svg-input').value.trim();
+    document.getElementById('new-preview').src = svg
+      ? 'data:image/svg+xml,' + encodeURIComponent(svg) : '';
   }
 
   async function addSite() {
@@ -1168,6 +1225,68 @@ ${nav("favicon")}
     });
     var data = await res.json();
     if (!res.ok) { errEl.textContent = data.error || 'Save failed'; return; }
+    window.location.reload();
+  }
+
+  // ── Platform default ───────────────────────────────────────────────────────
+
+  function openDefaultEdit() {
+    var ta = document.getElementById('default-svg-input');
+    ta.value = DEFAULT_STORED_SVG;
+    updateDefaultPreview();
+    document.getElementById('default-edit-area').style.display = '';
+    ta.focus();
+  }
+
+  function closeDefaultEdit() {
+    document.getElementById('default-edit-area').style.display = 'none';
+    document.getElementById('default-err').textContent = '';
+  }
+
+  function updateDefaultPreview() {
+    var svg = document.getElementById('default-svg-input').value.trim();
+    document.getElementById('default-preview').src = svg
+      ? 'data:image/svg+xml,' + encodeURIComponent(svg) : '';
+  }
+
+  async function saveDefault() {
+    var svg = document.getElementById('default-svg-input').value.trim();
+    var errEl = document.getElementById('default-err');
+    errEl.textContent = '';
+    var res = await fetch('/api/admin/favicon/default', {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: svg,
+    });
+    var data = await res.json();
+    if (!res.ok) { errEl.textContent = data.error || 'Save failed'; return; }
+    DEFAULT_STORED_SVG = svg;
+    var dataUrl = 'data:image/svg+xml,' + encodeURIComponent(svg);
+    DEFAULT_DATA_URL = dataUrl;
+    document.getElementById('default-thumb').src = dataUrl;
+    document.getElementById('default-status').innerHTML =
+      '<span class="badge badge-custom">Custom</span>';
+    var actEl = document.getElementById('default-actions');
+    if (!actEl.querySelector('.decline-btn')) {
+      var btn = document.createElement('button');
+      btn.className = 'decline-btn';
+      btn.setAttribute('onclick', 'resetDefault(this)');
+      btn.textContent = 'Reset to fallback';
+      actEl.appendChild(btn);
+    }
+    document.querySelectorAll('[id^="thumb-"]').forEach(function(img) {
+      var site = img.id.slice('thumb-'.length);
+      var row = document.getElementById('row-' + site);
+      if (row && !row.dataset.svg) img.src = dataUrl;
+    });
+    closeDefaultEdit();
+  }
+
+  async function resetDefault(btn) {
+    if (!confirm('Reset platform default to the hardcoded fallback?')) return;
+    btn.disabled = true;
+    var res = await fetch('/api/admin/favicon/default', { method: 'DELETE' });
+    if (!res.ok) { btn.disabled = false; return; }
     window.location.reload();
   }
 </script>
@@ -1209,6 +1328,34 @@ app.delete("/api/admin/favicons/:site", async (c) => {
         return c.json({ error: "Invalid site name" }, 400);
 
     await c.env.PLATFORM_ASSETS.delete(`platform_favicon:${lSite}`);
+    return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/favicon/default — write the global platform_favicon key
+// ---------------------------------------------------------------------------
+
+app.post("/api/admin/favicon/default", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    const lRaw = await c.req.text();
+    const lResult = validateSvg(lRaw);
+    if (!lResult.ok) return c.json({ error: lResult.error }, 400);
+
+    await c.env.PLATFORM_ASSETS.put("platform_favicon", lResult.svg);
+    return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// DELETE /api/admin/favicon/default — remove the global platform_favicon key
+// ---------------------------------------------------------------------------
+
+app.delete("/api/admin/favicon/default", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    await c.env.PLATFORM_ASSETS.delete("platform_favicon");
     return c.json({ ok: true });
 });
 

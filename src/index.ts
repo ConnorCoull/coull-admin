@@ -5,10 +5,13 @@
  *   GET  /                           → redirect to /requests
  *   GET  /requests                   → access request management (owner-only)
  *   GET  /feedback                   → feedback viewer (owner-only)
+ *   GET  /favicon                    → favicon manager (owner-only)
  *   GET  /api/admin/requests         → JSON list (owner-only)
  *   POST /api/admin/requests/:id/approve
  *   POST /api/admin/requests/:id/decline
  *   POST /api/admin/revoke
+ *   POST /api/admin/favicons/:site   → write favicon to KV (owner-only)
+ *   DELETE /api/admin/favicons/:site → remove favicon from KV (owner-only)
  *   OPTIONS /api/feedback            → CORS preflight
  *   POST /api/feedback               → submit feedback (session-optional)
  */
@@ -25,6 +28,7 @@ type Env = {
     AUTH_URL?: string;
     // Service Binding to coull-auth — avoids same-zone HTTP 522s in production.
     AUTH_SERVICE?: { fetch(request: Request): Promise<Response> };
+    PLATFORM_ASSETS: KVNamespace;
 };
 
 const app = new Hono<{ Bindings: Env }>();
@@ -223,12 +227,14 @@ async function checkIpRateLimit(
  * Inputs: active page name for nav highlighting.
  * Outputs: HTML nav string.
  */
-function nav(xiActive: "requests" | "feedback"): string {
+function nav(xiActive: "requests" | "feedback" | "favicon"): string {
     const lRActive = xiActive === "requests" ? ' class="active"' : "";
     const lFActive = xiActive === "feedback" ? ' class="active"' : "";
+    const lIActive = xiActive === "favicon" ? ' class="active"' : "";
     return `<nav class="nav">
   <a href="/requests"${lRActive}>Requests</a>
   <a href="/feedback"${lFActive}>Feedback</a>
+  <a href="/favicon"${lIActive}>Favicons</a>
 </nav>`;
 }
 
@@ -367,7 +373,144 @@ tr:last-child td { border-bottom: none; }
     padding: .45rem 1rem; font-size: .82rem;
   }
 }
+/* ── Favicon manager ── */
+.badge {
+  display: inline-block; padding: .2rem .5rem;
+  border-radius: 4px; font-size: .75rem; font-weight: 500;
+}
+.badge-custom { background: #e8f5e9; color: #2e7d32; }
+.badge-default { background: #f5f5f5; color: #888; }
+.edit-area {
+  display: flex; gap: 1.25rem;
+  align-items: flex-start; padding: .75rem 0;
+}
+.svg-textarea {
+  width: 100%; font-family: monospace; font-size: .8rem;
+  border: 1px solid #ddd; border-radius: 6px;
+  padding: .5rem; resize: vertical;
+}
+.svg-textarea:focus { outline: 2px solid #111; border-color: transparent; }
+.add-form {
+  margin-top: 1.5rem; padding: 1.25rem;
+  background: #fff; border-radius: 8px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.08);
+}
+.add-form h2 { font-size: .95rem; margin: 0 0 .75rem; }
+.add-form-row { display: flex; gap: 1.25rem; align-items: flex-start; }
+.add-form input[type=text] {
+  width: 200px; padding: .45rem .75rem;
+  border: 1px solid #ddd; border-radius: 6px; font-size: .9rem;
+}
+.add-form input[type=text]:focus {
+  outline: 2px solid #111; border-color: transparent;
+}
+/* ── Feedback archive ── */
+.archive-btn {
+  padding: .3rem .8rem; border: none; border-radius: 4px;
+  font-size: .8rem; cursor: pointer; background: #f5f5f5; color: #555;
+}
+.archive-btn:hover { background: #e8e8e8; color: #111; }
+.archive-pick { display: flex; align-items: center; gap: .35rem; }
+.close-select {
+  padding: .25rem .4rem; font-size: .8rem;
+  border: 1px solid #ddd; border-radius: 4px; background: #fff;
+}
+.confirm-archive-btn {
+  background: #111; color: #fff; border: none;
+  border-radius: 4px; padding: .25rem .5rem;
+  cursor: pointer; font-size: .85rem;
+}
+.confirm-archive-btn:hover { background: #333; }
+.cancel-archive-btn {
+  background: #f5f5f5; color: #555; border: none;
+  border-radius: 4px; padding: .25rem .5rem;
+  cursor: pointer; font-size: .85rem;
+}
+.cancel-archive-btn:hover { background: #e8e8e8; }
+.close-badge {
+  display: inline-block; padding: .2rem .5rem;
+  border-radius: 4px; font-size: .75rem; font-weight: 500;
+  background: #f0f0f0; color: #555;
+}
+.purge-btn {
+  padding: .3rem .9rem; border: none; border-radius: 4px;
+  font-size: .8rem; cursor: pointer;
+  background: #fdecea; color: #c0392b;
+}
+.purge-btn:hover:not(:disabled) { background: #f5c6c2; }
+.purge-btn:disabled { opacity: .5; cursor: default; }
+/* ── Email obfuscation ── */
+.email-cell {
+  display: inline-flex; align-items: center; gap: .35rem;
+}
+.eye-btn {
+  background: none; border: none; cursor: pointer;
+  padding: 0; color: #aaa; line-height: 1;
+  display: inline-flex; align-items: center; flex-shrink: 0;
+}
+.eye-btn:hover { color: #111; }
 `;
+
+// Inline SVG icons for the email reveal toggle button.
+const EYE_SVG =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" ` +
+    `viewBox="0 0 24 24" fill="none" stroke="currentColor" ` +
+    `stroke-width="2" stroke-linecap="round" stroke-linejoin="round">` +
+    `<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>` +
+    `<circle cx="12" cy="12" r="3"/></svg>`;
+
+/**
+ * Inputs: email address string.
+ * Outputs: obfuscated version showing first char, ***, and @domain.
+ * Logic: hides most of local part to prevent accidental shoulder-surf leakage.
+ */
+function obfuscateEmail(xiEmail: string): string {
+    const lAt = xiEmail.indexOf("@");
+    if (lAt < 0) return xiEmail;
+    return `${xiEmail[0]}***${xiEmail.slice(lAt)}`;
+}
+
+/**
+ * Inputs: email address string.
+ * Outputs: HTML span with masked email text and an eye-toggle button.
+ * Logic: full email stored in data-full; client toggleEmail() handles reveal.
+ */
+function emailCellHtml(xiEmail: string): string {
+    return (
+        `<span class="email-cell">` +
+        `<span class="email-text">${escapeHtml(obfuscateEmail(xiEmail))}</span>` +
+        `<button class="eye-btn" onclick="toggleEmail(this)" ` +
+        `data-full="${escapeHtml(xiEmail)}" title="Show email">${EYE_SVG}</button>` +
+        `</span>`
+    );
+}
+
+const KNOWN_SITES = ["coull", "admin", "auth", "flashcards"] as const;
+const SITE_RE = /^[a-z0-9-]{1,63}$/;
+
+/**
+ * Inputs: raw SVG string submitted by the client.
+ * Outputs: trimmed SVG on success; error message on failure.
+ * Logic: structural and security checks sufficient for owner-only use.
+ */
+function validateSvg(
+    xiRaw: string,
+): { ok: true; svg: string } | { ok: false; error: string } {
+    const lSvg = xiRaw.trim();
+    if (lSvg.length > 65536)
+        return { ok: false, error: "SVG too large (max 64 KB)" };
+    if (!/^<svg[\s>]/i.test(lSvg))
+        return { ok: false, error: "Must begin with <svg" };
+    if (!lSvg.toLowerCase().endsWith("</svg>"))
+        return { ok: false, error: "Must end with </svg>" };
+    if (/<script/i.test(lSvg))
+        return { ok: false, error: "SVG must not contain <script>" };
+    if (/javascript:/i.test(lSvg))
+        return { ok: false, error: "SVG must not contain javascript:" };
+    if (/\bon\w+\s*=/i.test(lSvg))
+        return { ok: false, error: "SVG must not contain event handlers" };
+    return { ok: true, svg: lSvg };
+}
 
 // ---------------------------------------------------------------------------
 // GET / — redirect to /requests
@@ -425,7 +568,7 @@ app.get("/requests", async (c) => {
                       (r) => `
     <tr>
       <td>${escapeHtml(r.name ?? "—")}</td>
-      <td>${escapeHtml(r.email)}</td>
+      <td data-full="${escapeHtml(r.email)}">${emailCellHtml(r.email)}</td>
       <td>${fmtDate(r.createdAt)}</td>
       <td class="msg-cell">${r.message ? escapeHtml(r.message) : '<span style="color:#bbb">—</span>'}</td>
       <td><span class="action-btns">
@@ -444,7 +587,7 @@ app.get("/requests", async (c) => {
                       (r) => `
     <tr class="declined-row" data-name="${escapeHtml(r.name?.toLowerCase() ?? "")}" data-email="${escapeHtml(r.email.toLowerCase())}">
       <td>${escapeHtml(r.name ?? "—")}</td>
-      <td>${escapeHtml(r.email)}</td>
+      <td data-full="${escapeHtml(r.email)}">${emailCellHtml(r.email)}</td>
       <td>${fmtDate(r.createdAt)}</td>
       <td><button class="approve-btn" data-id="${r.id}" onclick="restore(this)">Approve</button></td>
     </tr>`,
@@ -459,7 +602,7 @@ app.get("/requests", async (c) => {
                       (r) => `
     <tr class="approved-row" data-name="${escapeHtml(r.name?.toLowerCase() ?? "")}" data-email="${escapeHtml(r.email.toLowerCase())}">
       <td>${escapeHtml(r.name ?? "—")}</td>
-      <td style="font-size:.8rem;color:#555">${escapeHtml(r.email)}</td>
+      <td data-full="${escapeHtml(r.email)}">${emailCellHtml(r.email)}</td>
       <td><button class="revoke-btn" data-email="${escapeHtml(r.email)}" onclick="revoke(this)">Revoke</button></td>
     </tr>`,
                   )
@@ -531,6 +674,59 @@ ${nav("requests")}
 </div>
 
 <script>
+  const eyeSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14"' +
+    ' viewBox="0 0 24 24" fill="none" stroke="currentColor"' +
+    ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>' +
+    '<circle cx="12" cy="12" r="3"/></svg>';
+  const eyeOffSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14"' +
+    ' viewBox="0 0 24 24" fill="none" stroke="currentColor"' +
+    ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8' +
+    'a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4' +
+    'c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/>' +
+    '<line x1="1" y1="1" x2="23" y2="23"/></svg>';
+
+  function obfEmail(email) {
+    const at = email.indexOf('@');
+    return at < 0 ? email : email[0] + '***' + email.slice(at);
+  }
+
+  function toggleEmail(btn) {
+    const textSpan = btn.previousElementSibling;
+    if (btn.dataset.shown) {
+      textSpan.textContent = obfEmail(btn.dataset.full);
+      btn.innerHTML = eyeSvg;
+      btn.title = 'Show email';
+      delete btn.dataset.shown;
+    } else {
+      textSpan.textContent = btn.dataset.full;
+      btn.innerHTML = eyeOffSvg;
+      btn.title = 'Hide email';
+      btn.dataset.shown = '1';
+    }
+  }
+
+  function makeEmailTd(email) {
+    const td = document.createElement('td');
+    td.dataset.full = email;
+    const wrap = document.createElement('span');
+    wrap.className = 'email-cell';
+    const text = document.createElement('span');
+    text.className = 'email-text';
+    text.textContent = obfEmail(email);
+    const eyeBtn = document.createElement('button');
+    eyeBtn.className = 'eye-btn';
+    eyeBtn.title = 'Show email';
+    eyeBtn.setAttribute('onclick', 'toggleEmail(this)');
+    eyeBtn.dataset.full = email;
+    eyeBtn.innerHTML = eyeSvg;
+    wrap.appendChild(text);
+    wrap.appendChild(eyeBtn);
+    td.appendChild(wrap);
+    return td;
+  }
+
   function filterDeclined(q) {
     const lQ = q.toLowerCase();
     document.querySelectorAll('#declined-body .declined-row').forEach(row => {
@@ -567,7 +763,7 @@ ${nav("requests")}
     const row = btn.closest('tr');
     const cells = row.querySelectorAll('td');
     const name = cells[0].textContent.trim();
-    const email = cells[1].textContent.trim();
+    const email = cells[1].dataset.full || cells[1].textContent.trim();
     const date = cells[2].textContent.trim();
     const id = btn.dataset.id;
     const res = await fetch(
@@ -591,8 +787,7 @@ ${nav("requests")}
       newRow.dataset.email = email.toLowerCase();
       const tdN = document.createElement('td');
       tdN.textContent = name;
-      const tdE = document.createElement('td');
-      tdE.textContent = email;
+      const tdE = makeEmailTd(email);
       const tdD = document.createElement('td');
       tdD.textContent = date;
       const tdA = document.createElement('td');
@@ -735,6 +930,289 @@ ${nav("requests")}
 });
 
 // ---------------------------------------------------------------------------
+// GET /favicon — owner-gated favicon manager
+// ---------------------------------------------------------------------------
+
+app.get("/favicon", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    // Discover all configured sites from KV and merge with well-known list.
+    const lList = await c.env.PLATFORM_ASSETS.list({
+        prefix: "platform_favicon:",
+    });
+    const lCustomSites = lList.keys.map((k) =>
+        k.name.slice("platform_favicon:".length),
+    );
+    const lAllSites = [...new Set([...KNOWN_SITES, ...lCustomSites])];
+
+    // Fetch SVG values only for custom sites.
+    const lSvgMap = new Map<string, string>();
+    await Promise.all(
+        lCustomSites.map(async (lSite) => {
+            const lVal = await c.env.PLATFORM_ASSETS.get(
+                `platform_favicon:${lSite}`,
+            );
+            if (lVal) lSvgMap.set(lSite, lVal);
+        }),
+    );
+
+    const lDefaultDataUrl = `data:image/svg+xml,${encodeURIComponent(
+        FALLBACK_SVG,
+    )}`;
+
+    const lRowsHtml = lAllSites
+        .map((lSite) => {
+            const lSvg = lSvgMap.get(lSite);
+            const lIsCustom = lSvg !== undefined;
+            const lThumbSrc = lIsCustom
+                ? `data:image/svg+xml,${encodeURIComponent(lSvg)}`
+                : lDefaultDataUrl;
+            const lStatusHtml = lIsCustom
+                ? `<span class="badge badge-custom">Custom</span>`
+                : `<span class="badge badge-default">Default</span>`;
+            const lResetBtn = lIsCustom
+                ? `<button class="decline-btn"` +
+                  ` onclick="resetFavicon('${lSite}',this)">Reset</button>`
+                : "";
+            return (
+                `
+    <tr id="row-${lSite}" data-svg="${escapeHtml(lSvg ?? "")}">
+      <td>
+        <img id="thumb-${lSite}" src="${lThumbSrc}"
+             width="32" height="32" alt="">
+      </td>
+      <td><code>${escapeHtml(lSite)}</code></td>
+      <td id="status-${lSite}">${lStatusHtml}</td>
+      <td class="action-btns" id="actions-${lSite}">
+        <button class="approve-btn"
+                onclick="openEdit('${lSite}')">Edit</button>
+        ${lResetBtn}
+      </td>
+    </tr>
+    <tr id="edit-${lSite}" style="display:none">
+      <td colspan="4">
+        <div class="edit-area">
+          <div style="flex:1;min-width:0">
+            <textarea
+              id="svg-input-${lSite}"
+              class="svg-textarea"
+              rows="8"
+              placeholder="Paste SVG here…"
+              oninput="updatePreview('${lSite}')"
+            ></textarea>
+            <div style="display:flex;gap:.5rem;margin-top:.5rem">
+              <button class="approve-btn"
+                      onclick="saveFavicon('${lSite}')">Save</button>
+              <button
+                style="padding:.3rem .8rem;border:1px solid #ddd;` +
+                `border-radius:4px;background:#fff;cursor:pointer;` +
+                `font-size:.8rem"
+                onclick="closeEdit('${lSite}')">Cancel</button>
+            </div>
+            <p id="err-${lSite}"
+               style="color:#c0392b;font-size:.8rem;margin:.4rem 0 0">
+            </p>
+          </div>
+          <img id="preview-${lSite}" width="80" height="80" alt="Preview"
+               style="border:1px solid #eee;border-radius:4px;` +
+                `flex-shrink:0;background:#fafafa">
+        </div>
+      </td>
+    </tr>`
+            );
+        })
+        .join("");
+
+    return c.html(
+        `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin — Favicons</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <style>${SHARED_STYLES}</style>
+</head>
+<body>
+${nav("favicon")}
+<h1>Favicons</h1>
+<p class="subtitle">
+  Per-site icons served at
+  <code>coull.ai/favicon.svg?site=…</code>
+</p>
+<div class="table-wrap" style="margin-top:.75rem">
+  <table>
+    <thead>
+      <tr>
+        <th>Preview</th><th>Site</th><th>Status</th><th></th>
+      </tr>
+    </thead>
+    <tbody id="favicon-body">${lRowsHtml}</tbody>
+  </table>
+</div>
+
+<div class="add-form">
+  <h2>Add site</h2>
+  <div class="add-form-row">
+    <div>
+      <input type="text" id="new-site-name"
+             placeholder="subdomain" maxlength="63"
+             pattern="[a-z0-9\\-]+"
+             title="Lowercase letters, digits, hyphens only">
+    </div>
+    <div style="flex:1;min-width:0">
+      <textarea id="new-svg-input" class="svg-textarea" rows="6"
+                placeholder="Paste SVG here…"
+                oninput="updateNewPreview()"></textarea>
+    </div>
+    <img id="new-preview" width="80" height="80" alt="Preview"
+         style="border:1px solid #eee;border-radius:4px;` +
+            `flex-shrink:0;background:#fafafa">
+  </div>
+  <div style="display:flex;gap:.5rem;margin-top:.75rem;align-items:center">
+    <button class="approve-btn" onclick="addSite()">Add</button>
+    <p id="add-err"
+       style="color:#c0392b;font-size:.8rem;margin:0"></p>
+  </div>
+</div>
+
+<script>
+  var DEFAULT_DATA_URL = ${JSON.stringify(lDefaultDataUrl)};
+
+  function openEdit(site) {
+    var row = document.getElementById('row-' + site);
+    var editRow = document.getElementById('edit-' + site);
+    var textarea = document.getElementById('svg-input-' + site);
+    textarea.value = row.dataset.svg || '';
+    updatePreview(site);
+    editRow.style.display = '';
+    textarea.focus();
+  }
+
+  function closeEdit(site) {
+    document.getElementById('edit-' + site).style.display = 'none';
+    document.getElementById('err-' + site).textContent = '';
+  }
+
+  function updatePreview(site) {
+    var svg = document.getElementById('svg-input-' + site).value.trim();
+    document.getElementById('preview-' + site).src = svg
+      ? 'data:image/svg+xml,' + encodeURIComponent(svg) : '';
+  }
+
+  function updateNewPreview() {
+    var svg = document.getElementById('new-svg-input').value.trim();
+    document.getElementById('new-preview').src = svg
+      ? 'data:image/svg+xml,' + encodeURIComponent(svg) : '';
+  }
+
+  async function saveFavicon(site) {
+    var svg = document.getElementById('svg-input-' + site).value.trim();
+    var errEl = document.getElementById('err-' + site);
+    errEl.textContent = '';
+    var res = await fetch('/api/admin/favicons/' + site, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: svg,
+    });
+    var data = await res.json();
+    if (!res.ok) { errEl.textContent = data.error || 'Save failed'; return; }
+    var row = document.getElementById('row-' + site);
+    row.dataset.svg = svg;
+    document.getElementById('thumb-' + site).src =
+      'data:image/svg+xml,' + encodeURIComponent(svg);
+    document.getElementById('status-' + site).innerHTML =
+      '<span class="badge badge-custom">Custom</span>';
+    var actionsEl = document.getElementById('actions-' + site);
+    if (!actionsEl.querySelector('.decline-btn')) {
+      var btn = document.createElement('button');
+      btn.className = 'decline-btn';
+      btn.setAttribute('onclick', "resetFavicon('" + site + "',this)");
+      btn.textContent = 'Reset';
+      actionsEl.appendChild(btn);
+    }
+    closeEdit(site);
+  }
+
+  async function resetFavicon(site, btn) {
+    if (!confirm('Reset ' + site + ' to the default favicon?')) return;
+    btn.disabled = true;
+    var res = await fetch('/api/admin/favicons/' + site,
+      { method: 'DELETE' });
+    if (!res.ok) { btn.disabled = false; return; }
+    var row = document.getElementById('row-' + site);
+    row.dataset.svg = '';
+    document.getElementById('thumb-' + site).src = DEFAULT_DATA_URL;
+    document.getElementById('status-' + site).innerHTML =
+      '<span class="badge badge-default">Default</span>';
+    btn.remove();
+  }
+
+  async function addSite() {
+    var site = document.getElementById('new-site-name')
+      .value.trim().toLowerCase();
+    var svg = document.getElementById('new-svg-input').value.trim();
+    var errEl = document.getElementById('add-err');
+    errEl.textContent = '';
+    if (!/^[a-z0-9-]{1,63}$/.test(site)) {
+      errEl.textContent =
+        'Invalid name — lowercase letters, digits, hyphens, 1-63 chars';
+      return;
+    }
+    if (!svg) { errEl.textContent = 'SVG is required'; return; }
+    var res = await fetch('/api/admin/favicons/' + site, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: svg,
+    });
+    var data = await res.json();
+    if (!res.ok) { errEl.textContent = data.error || 'Save failed'; return; }
+    window.location.reload();
+  }
+</script>
+</body>
+</html>`,
+    );
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/favicons/:site — write a favicon SVG to KV (owner-only)
+// ---------------------------------------------------------------------------
+
+app.post("/api/admin/favicons/:site", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    const lSite = c.req.param("site");
+    if (!SITE_RE.test(lSite))
+        return c.json({ error: "Invalid site name" }, 400);
+
+    const lRaw = await c.req.text();
+    const lResult = validateSvg(lRaw);
+    if (!lResult.ok) return c.json({ error: lResult.error }, 400);
+
+    await c.env.PLATFORM_ASSETS.put(`platform_favicon:${lSite}`, lResult.svg);
+    return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// DELETE /api/admin/favicons/:site — remove a favicon from KV (owner-only)
+// ---------------------------------------------------------------------------
+
+app.delete("/api/admin/favicons/:site", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    const lSite = c.req.param("site");
+    if (!SITE_RE.test(lSite))
+        return c.json({ error: "Invalid site name" }, 400);
+
+    await c.env.PLATFORM_ASSETS.delete(`platform_favicon:${lSite}`);
+    return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/admin/requests — JSON list of all access requests (owner-only)
 // ---------------------------------------------------------------------------
 
@@ -824,14 +1302,21 @@ app.post("/api/admin/revoke", async (c) => {
 // GET /feedback — owner-gated feedback submissions viewer
 // ---------------------------------------------------------------------------
 
+const CLOSE_REASONS = new Set([
+    "spam",
+    "fixed",
+    "not-going-to-fix",
+    "made-ticket",
+]);
+
 app.get("/feedback", async (c) => {
     const lUnauth = await requireOwner(c);
     if (lUnauth) return lUnauth;
 
-    const lRows = await c.env.DB.prepare(
+    const lActiveRows = await c.env.DB.prepare(
         "SELECT id, user_email, user_name, app_name, page_url," +
             " message, reason, created_at" +
-            " FROM feedback ORDER BY created_at DESC",
+            " FROM feedback WHERE archived_at IS NULL ORDER BY created_at DESC",
     ).all<{
         id: string;
         user_email: string | null;
@@ -843,19 +1328,36 @@ app.get("/feedback", async (c) => {
         created_at: number;
     }>();
 
-    const lAppNames = [...new Set(lRows.results.map((r) => r.app_name))];
+    const lArchivedRows = await c.env.DB.prepare(
+        "SELECT id, user_email, user_name, app_name, page_url," +
+            " message, reason, created_at, close_reason" +
+            " FROM feedback WHERE archived_at IS NOT NULL" +
+            " ORDER BY archived_at DESC",
+    ).all<{
+        id: string;
+        user_email: string | null;
+        user_name: string | null;
+        app_name: string;
+        page_url: string;
+        message: string;
+        reason: string | null;
+        created_at: number;
+        close_reason: string | null;
+    }>();
+
+    const lActive = lActiveRows.results;
+    const lArchived = lArchivedRows.results;
+
+    const lAppNames = [...new Set(lActive.map((r) => r.app_name))];
     const lAppOptions = lAppNames
         .map(
             (a) => `<option value="${escapeHtml(a)}">${escapeHtml(a)}</option>`,
         )
         .join("");
 
-    // Reasons present in the data (pre-migration rows have none).
     const lReasons = [
         ...new Set(
-            lRows.results
-                .map((r) => r.reason)
-                .filter((r): r is string => r !== null),
+            lActive.map((r) => r.reason).filter((r): r is string => r !== null),
         ),
     ];
     const lReasonOptions = lReasons
@@ -864,15 +1366,28 @@ app.get("/feedback", async (c) => {
         )
         .join("");
 
+    /**
+     * Inputs: feedback row object.
+     * Outputs: HTML string for a user cell (name + obfuscated email or anon).
+     * Logic: shared between active and archived row renderers.
+     */
+    function userCellHtml(r: {
+        user_email: string | null;
+        user_name: string | null;
+    }): string {
+        return r.user_email
+            ? `${escapeHtml(r.user_name ?? "—")}<br>` +
+                  `<span style="color:#888;font-size:.8rem">` +
+                  emailCellHtml(r.user_email) +
+                  `</span>`
+            : `<span style="color:#aaa">anonymous</span>`;
+    }
+
     const lFeedbackHtml =
-        lRows.results.length === 0
-            ? `<tr><td colspan="6" style="text-align:center;color:#888;padding:2rem">No feedback yet</td></tr>`
-            : lRows.results
+        lActive.length === 0
+            ? `<tr><td colspan="7" style="text-align:center;color:#888;padding:2rem">No feedback yet</td></tr>`
+            : lActive
                   .map((r) => {
-                      const lUserCell = r.user_email
-                          ? `${escapeHtml(r.user_name ?? "—")}<br>` +
-                            `<span style="color:#888;font-size:.8rem">${escapeHtml(r.user_email)}</span>`
-                          : `<span style="color:#aaa">anonymous</span>`;
                       const lPageDisplay =
                           r.page_url.length > 50
                               ? `${r.page_url.slice(0, 50)}…`
@@ -881,13 +1396,42 @@ app.get("/feedback", async (c) => {
                           ? escapeHtml(r.reason)
                           : `<span style="color:#bbb">—</span>`;
                       return `
-    <tr class="feedback-row" data-app="${escapeHtml(r.app_name)}" data-reason="${escapeHtml(r.reason ?? "")}">
+    <tr class="feedback-row" data-app="${escapeHtml(r.app_name)}" data-reason="${escapeHtml(r.reason ?? "")}" data-id="${escapeHtml(r.id)}">
       <td style="white-space:nowrap">${fmtDate(r.created_at)}</td>
       <td><code>${escapeHtml(r.app_name)}</code></td>
       <td>${lReasonCell}</td>
-      <td>${lUserCell}</td>
+      <td>${userCellHtml(r)}</td>
       <td title="${escapeHtml(r.page_url)}" style="font-size:.8rem;color:#555">${escapeHtml(lPageDisplay)}</td>
       <td class="msg-cell">${escapeHtml(r.message)}</td>
+      <td><button class="archive-btn" onclick="archiveRow(this)">Archive</button></td>
+    </tr>`;
+                  })
+                  .join("");
+
+    const lArchivedHtml =
+        lArchived.length === 0
+            ? `<tr class="archived-empty"><td colspan="7" style="text-align:center;color:#888;padding:2rem">No archived items</td></tr>`
+            : lArchived
+                  .map((r) => {
+                      const lPageDisplay =
+                          r.page_url.length > 50
+                              ? `${r.page_url.slice(0, 50)}…`
+                              : r.page_url;
+                      const lReasonCell = r.reason
+                          ? escapeHtml(r.reason)
+                          : `<span style="color:#bbb">—</span>`;
+                      const lCloseBadge = r.close_reason
+                          ? `<span class="close-badge">${escapeHtml(r.close_reason)}</span>`
+                          : `<span style="color:#bbb">—</span>`;
+                      return `
+    <tr class="archived-row">
+      <td style="white-space:nowrap">${fmtDate(r.created_at)}</td>
+      <td><code>${escapeHtml(r.app_name)}</code></td>
+      <td>${lReasonCell}</td>
+      <td>${userCellHtml(r)}</td>
+      <td title="${escapeHtml(r.page_url)}" style="font-size:.8rem;color:#555">${escapeHtml(lPageDisplay)}</td>
+      <td class="msg-cell">${escapeHtml(r.message)}</td>
+      <td>${lCloseBadge}</td>
     </tr>`;
                   })
                   .join("");
@@ -904,7 +1448,7 @@ app.get("/feedback", async (c) => {
 <body>
 ${nav("feedback")}
 <h1>Feedback</h1>
-<p class="subtitle">${lRows.results.length} submissions</p>
+<p class="subtitle" id="active-count">${lActive.length} submissions</p>
 <select id="app-filter" class="filter-select" oninput="applyFilters()" style="max-width:200px">
   <option value="">All apps</option>
   ${lAppOptions}
@@ -917,11 +1461,31 @@ ${nav("feedback")}
   <table>
     <thead>
       <tr>
-        <th>Date</th><th>App</th><th>Reason</th><th>User</th><th>Page</th><th>Message</th>
+        <th>Date</th><th>App</th><th>Category</th><th>User</th><th>Page</th><th>Message</th><th></th>
       </tr>
     </thead>
     <tbody id="feedback-body">${lFeedbackHtml}</tbody>
   </table>
+</div>
+
+<div style="margin-top:2rem">
+  <div class="panel-head" style="justify-content:space-between;margin-bottom:.6rem">
+    <div style="display:flex;align-items:baseline;gap:.5rem">
+      <h2>Archived</h2>
+      <span class="subtitle" id="archived-count">${lArchived.length} items</span>
+    </div>
+    <button id="purge-btn" class="purge-btn" onclick="purgeArchived()"${lArchived.length === 0 ? " disabled" : ""}>Delete all</button>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Date</th><th>App</th><th>Category</th><th>User</th><th>Page</th><th>Message</th><th>Close</th>
+        </tr>
+      </thead>
+      <tbody id="archived-body">${lArchivedHtml}</tbody>
+    </table>
+  </div>
 </div>
 
 <script>
@@ -934,9 +1498,142 @@ ${nav("feedback")}
       row.style.display = show ? '' : 'none';
     });
   }
+
+  function archiveRow(btn) {
+    const td = btn.parentElement;
+    td.innerHTML =
+      '<div class="archive-pick">' +
+        '<select class="close-select">' +
+          '<option value="spam">Spam</option>' +
+          '<option value="fixed">Fixed</option>' +
+          '<option value="not-going-to-fix">Not going to fix</option>' +
+          '<option value="made-ticket">Made ticket</option>' +
+        '</select>' +
+        '<button class="confirm-archive-btn" onclick="confirmArchive(this)">✓</button>' +
+        '<button class="cancel-archive-btn" onclick="cancelArchive(this)">✗</button>' +
+      '</div>';
+  }
+
+  function cancelArchive(btn) {
+    const td = btn.closest('td');
+    td.innerHTML = '<button class="archive-btn" onclick="archiveRow(this)">Archive</button>';
+  }
+
+  async function confirmArchive(btn) {
+    const pick = btn.closest('.archive-pick');
+    const closeReason = pick.querySelector('.close-select').value;
+    const row = pick.closest('tr');
+    const id = row.dataset.id;
+
+    pick.querySelectorAll('button').forEach(b => b.disabled = true);
+
+    const res = await fetch('/api/admin/feedback/' + id + '/archive', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ closeReason }),
+    });
+
+    if (!res.ok) {
+      pick.querySelectorAll('button').forEach(b => b.disabled = false);
+      return;
+    }
+
+    // Move row to archived section.
+    const actionTd = pick.closest('td');
+    const badge = '<span class="close-badge">' + closeReason + '</span>';
+    actionTd.innerHTML = badge;
+    row.classList.remove('feedback-row');
+    row.classList.add('archived-row');
+    delete row.dataset.id;
+
+    const archivedBody = document.getElementById('archived-body');
+    const emptyRow = archivedBody.querySelector('.archived-empty');
+    if (emptyRow) emptyRow.remove();
+    archivedBody.insertBefore(row, archivedBody.firstChild);
+
+    const activeEl = document.getElementById('active-count');
+    const lActiveN = Math.max(0, parseInt(activeEl.textContent) - 1);
+    activeEl.textContent = lActiveN + ' submissions';
+
+    const archivedEl = document.getElementById('archived-count');
+    archivedEl.textContent = (parseInt(archivedEl.textContent) + 1) + ' items';
+
+    document.getElementById('purge-btn').disabled = false;
+  }
+
+  async function purgeArchived() {
+    const count = parseInt(document.getElementById('archived-count').textContent);
+    if (!count || !confirm('Permanently delete ' + count + ' archived items?')) return;
+    const btn = document.getElementById('purge-btn');
+    btn.disabled = true;
+    btn.textContent = 'Deleting…';
+    const res = await fetch('/api/admin/feedback/archived', { method: 'DELETE' });
+    if (res.ok) {
+      const tbody = document.getElementById('archived-body');
+      tbody.innerHTML =
+        '<tr class="archived-empty"><td colspan="7"' +
+        ' style="text-align:center;color:#888;padding:2rem">No archived items</td></tr>';
+      document.getElementById('archived-count').textContent = '0 items';
+      btn.textContent = 'Delete all';
+    } else {
+      btn.disabled = false;
+      btn.textContent = 'Delete all';
+    }
+  }
 </script>
 </body>
 </html>`);
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/feedback/:id/archive — soft-archive a feedback row
+// ---------------------------------------------------------------------------
+
+app.post("/api/admin/feedback/:id/archive", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    const lId = c.req.param("id");
+    let lBody: { closeReason?: unknown };
+    try {
+        lBody = await c.req.json();
+    } catch (_) {
+        return c.json({ error: "Invalid JSON" }, 400);
+    }
+
+    if (
+        typeof lBody?.closeReason !== "string" ||
+        !CLOSE_REASONS.has(lBody.closeReason)
+    ) {
+        return c.json({ error: "invalid closeReason" }, 400);
+    }
+
+    const lResult = await c.env.DB.prepare(
+        "UPDATE feedback SET archived_at = ?, close_reason = ?" +
+            " WHERE id = ? AND archived_at IS NULL",
+    )
+        .bind(Date.now(), lBody.closeReason, lId)
+        .run();
+
+    if (!lResult.meta.changes) {
+        return c.json({ error: "not found or already archived" }, 404);
+    }
+    return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// DELETE /api/admin/feedback/archived — permanently purge all archived rows
+// ---------------------------------------------------------------------------
+
+app.delete("/api/admin/feedback/archived", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    const lResult = await c.env.DB.prepare(
+        "DELETE FROM feedback WHERE archived_at IS NOT NULL",
+    ).run();
+
+    return c.json({ ok: true, deleted: lResult.meta.changes });
 });
 
 // ---------------------------------------------------------------------------

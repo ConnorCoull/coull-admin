@@ -21,6 +21,13 @@
             "database_id": "94948899-03bf-4fee-a950-f8d7b8ff547a"
         }
     ],
+    "kv_namespaces": [
+        {
+            // Shared platform KV — same namespace as the coull.ai API worker.
+            "binding": "PLATFORM_ASSETS",
+            "id": "704b5cda48f74f369099bf6661f8d3e7"
+        }
+    ],
     "services": [
         {
             // Direct Worker-to-Worker binding — avoids same-zone HTTP 522s.

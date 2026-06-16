@@ -20,7 +20,7 @@ export interface FeedbackFields {
     message: string;
     appName: string;
     pageUrl: string;
-    reason: string | null;
+    reason: string;
 }
 
 export type FeedbackValidation =
@@ -32,8 +32,9 @@ export type FeedbackValidation =
  * Outputs: trimmed, length-checked fields ready for insertion, or an
  * error message suitable for a 400 response.
  * Logic: message/appName/pageUrl are required and length-capped; reason
- * is optional during rollout (older clients omit it) but must match the
- * FEEDBACK_REASONS allowlist when present; empty reason becomes null.
+ * is required and must match the FEEDBACK_REASONS allowlist. (It was
+ * optional during the 2026-06 rollout while pre-reason clients were
+ * still live; rows from that window have a NULL reason in the DB.)
  */
 export function validateFeedback(xiBody: FeedbackBody): FeedbackValidation {
     const lMessage = xiBody.message?.trim() ?? "";
@@ -56,7 +57,10 @@ export function validateFeedback(xiBody: FeedbackBody): FeedbackValidation {
     if (lPageUrl.length > 512) {
         return { ok: false, error: "pageUrl too long (max 512 chars)" };
     }
-    if (lReason && !FEEDBACK_REASONS.has(lReason)) {
+    if (!lReason) {
+        return { ok: false, error: "reason is required" };
+    }
+    if (!FEEDBACK_REASONS.has(lReason)) {
         return { ok: false, error: "invalid reason" };
     }
 
@@ -66,7 +70,7 @@ export function validateFeedback(xiBody: FeedbackBody): FeedbackValidation {
             message: lMessage,
             appName: lAppName,
             pageUrl: lPageUrl,
-            reason: lReason || null,
+            reason: lReason,
         },
     };
 }

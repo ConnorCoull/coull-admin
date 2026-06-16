@@ -523,6 +523,16 @@ const FAVICON_PRESETS: { label: string; svg: string }[] = [
 const SITE_RE = /^[a-z0-9-]{1,63}$/;
 
 /**
+ * Inputs: any JSON-serialisable value.
+ * Outputs: JSON string safe to embed directly in an HTML <script> block.
+ * Logic: escapes '</' so the HTML parser cannot mistake SVG/HTML inside
+ * string values for a closing </script> tag.
+ */
+function safeJson(xiData: unknown): string {
+    return JSON.stringify(xiData).replace(/<\//g, "<\\/");
+}
+
+/**
  * Inputs: raw SVG string submitted by the client.
  * Outputs: trimmed SVG on success; error message on failure.
  * Logic: structural and security checks sufficient for owner-only use.
@@ -1117,13 +1127,13 @@ app.get("/favicon", async (c) => {
 </head>
 <body>
 ${nav("favicon")}
-<h1>Favicons</h1>
+<h1>Favicons <span style="font-weight:400;color:#888;font-size:.85rem">${lCustomSites.length} custom</span></h1>
 <p class="subtitle">
   Per-site icons served at
   <code>coull.ai/favicon.svg?site=…</code>
 </p>
 ${lDefaultCardHtml}
-<div class="table-wrap" style="margin-top:1.5rem;flex:1;overflow-y:auto;min-height:0">
+<div class="table-wrap" style="margin-top:1.5rem;min-height:45vh;overflow-y:auto">
   <table>
     <thead>
       <tr>
@@ -1163,10 +1173,10 @@ ${lDefaultCardHtml}
 <script>
   var KNOWN_SITES = ${JSON.stringify([...KNOWN_SITES])};
   var DEFAULT_STORED_SVG = ${JSON.stringify(lGlobalSvg ?? "")};
-  var FAVICON_PRESETS = ${JSON.stringify(
+  var FAVICON_PRESETS = ${safeJson(
       FAVICON_PRESETS.map((lP) => ({ label: lP.label, svg: lP.svg })),
   )};
-  var STORED_FAVICONS = ${JSON.stringify(Object.fromEntries(lSvgMap))};
+  var STORED_FAVICONS = ${safeJson(Object.fromEntries(lSvgMap))};
 
   var pickerData = {};
 
@@ -1213,10 +1223,14 @@ ${lDefaultCardHtml}
     var textarea = document.getElementById('svg-input-' + site);
     var currentSvg = row.dataset.svg || '';
     textarea.value = currentSvg;
-    updatePreview(site);
-    renderPicker('picker-' + site, 'svg-input-' + site, 'site', site, currentSvg);
     editRow.style.display = '';
     textarea.focus();
+    updatePreview(site);
+    try {
+      renderPicker(
+        'picker-' + site, 'svg-input-' + site, 'site', site, currentSvg
+      );
+    } catch (e) { console.error('picker error', e); }
   }
 
   function closeEdit(site) {

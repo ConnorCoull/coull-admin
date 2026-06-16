@@ -1038,7 +1038,7 @@ ${nav("favicon")}
   </div>
   <div class="upload-row">
     <input type="text" id="design-name"
-           placeholder="design name (e.g. pride)" maxlength="63"
+           placeholder="design name" maxlength="63"
            style="width:180px;padding:.4rem .6rem;
                   border:1px solid #ddd;border-radius:6px;
                   font-size:.85rem">

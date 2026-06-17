@@ -993,18 +993,17 @@ app.get("/favicon", async (c) => {
                 `<p style="font-size:.8rem;color:#888;margin:0 0 .25rem">` +
                 `Select a design for` +
                 ` <strong>${escapeHtml(lSite)}</strong>:</p>` +
-                `<p style="font-size:.75rem;color:#bbb;margin:0 0 .5rem">` +
-                `Changes may take time to appear in browser tabs` +
-                ` due to favicon caching.</p>` +
                 `<div id="picker-grid-${lSite}" class="library-grid">` +
                 `<em style="color:#bbb;font-size:.8rem">Loading…</em>` +
                 `</div>` +
-                `<div style="display:flex;gap:.5rem;margin-top:.5rem">` +
+                `<div style="display:flex;gap:.5rem;margin-top:.5rem;align-items:center">` +
                 `<button id="confirm-${lSite}" class="approve-btn"` +
                 ` disabled>Confirm</button>` +
                 `<button style="padding:.25rem .6rem;font-size:.8rem;` +
                 `border:1px solid #ddd;border-radius:4px;background:#fff;` +
                 `cursor:pointer" onclick="closePicker()">Cancel</button>` +
+                `<span id="assign-msg-${lSite}"` +
+                ` style="color:#c0392b;font-size:.8rem"></span>` +
                 `</div>` +
                 `</td></tr>`
             );
@@ -1083,18 +1082,17 @@ ${nav("favicon")}
     <p style="font-size:.8rem;color:#888;margin:0 0 .25rem">
       Select a design for the platform default (used when no
       per-site design is set):</p>
-    <p style="font-size:.75rem;color:#bbb;margin:0 0 .5rem">
-      Changes may take time to appear in browser tabs due to
-      favicon caching.</p>
     <div id="default-picker-grid" class="library-grid">
       <em style="color:#bbb;font-size:.8rem">Loading…</em></div>
-    <div style="display:flex;gap:.5rem;margin-top:.5rem">
+    <div style="display:flex;gap:.5rem;margin-top:.5rem;align-items:center">
       <button id="confirm-default" class="approve-btn"
               disabled>Confirm</button>
       <button style="padding:.25rem .6rem;font-size:.8rem;
                      border:1px solid #ddd;border-radius:4px;
                      background:#fff;cursor:pointer"
               onclick="closePicker()">Cancel</button>
+      <span id="default-msg"
+            style="color:#c0392b;font-size:.8rem"></span>
     </div>
   </div>
 </div>
@@ -1291,11 +1289,17 @@ function openDefaultPicker() {
 }
 
 async function assignDesign(site, svg) {
+  var msgEl = document.getElementById('assign-msg-' + site);
+  msgEl.textContent = '';
   var res = await fetch(
     '/api/admin/favicons/' + encodeURIComponent(site),
     { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: svg },
   );
-  if (!res.ok) return;
+  if (!res.ok) {
+    var lErr = await res.json().catch(function() { return {}; });
+    msgEl.textContent = lErr.error || 'Save failed (' + res.status + ')';
+    return;
+  }
   var t = Date.now();
   document.getElementById('thumb-' + site).src =
     '/favicon.svg?site=' + encodeURIComponent(site) + '&t=' + t;
@@ -1319,7 +1323,12 @@ async function resetSite(site, btn) {
     '/api/admin/favicons/' + encodeURIComponent(site),
     { method: 'DELETE' },
   );
-  if (!res.ok) { btn.disabled = false; return; }
+  if (!res.ok) {
+    btn.disabled = false;
+    btn.textContent = 'Reset failed';
+    setTimeout(function() { btn.textContent = 'Reset'; }, 3000);
+    return;
+  }
   document.getElementById('thumb-' + site).src =
     '/favicon.svg?site=' + encodeURIComponent(site) + '&t=' + Date.now();
   document.getElementById('status-' + site).innerHTML =
@@ -1332,12 +1341,18 @@ async function resetSite(site, btn) {
 }
 
 async function assignDefault(svg) {
+  var msgEl = document.getElementById('default-msg');
+  msgEl.textContent = '';
   var res = await fetch('/api/admin/favicon/default', {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain' },
     body: svg,
   });
-  if (!res.ok) return;
+  if (!res.ok) {
+    var lErr = await res.json().catch(function() { return {}; });
+    msgEl.textContent = lErr.error || 'Save failed (' + res.status + ')';
+    return;
+  }
   document.getElementById('default-thumb').src =
     '/favicon.svg?t=' + Date.now();
   document.getElementById('default-status').innerHTML =

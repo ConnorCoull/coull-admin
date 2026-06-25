@@ -29,6 +29,7 @@ type Env = {
     // Service Binding to coull-auth — avoids same-zone HTTP 522s in production.
     AUTH_SERVICE?: { fetch(request: Request): Promise<Response> };
     PLATFORM_ASSETS: KVNamespace;
+    CV_BUCKET: R2Bucket;
 };
 
 const app = new Hono<{ Bindings: Env }>();
@@ -225,14 +226,16 @@ async function checkIpRateLimit(
  * Inputs: active page name for nav highlighting.
  * Outputs: HTML nav string.
  */
-function nav(xiActive: "requests" | "feedback" | "favicon"): string {
+function nav(xiActive: "requests" | "feedback" | "favicon" | "cv"): string {
     const lRActive = xiActive === "requests" ? ' class="active"' : "";
     const lFActive = xiActive === "feedback" ? ' class="active"' : "";
     const lIActive = xiActive === "favicon" ? ' class="active"' : "";
+    const lCActive = xiActive === "cv" ? ' class="active"' : "";
     return `<nav class="nav">
   <a href="/requests"${lRActive}>Requests</a>
   <a href="/feedback"${lFActive}>Feedback</a>
   <a href="/favicon"${lIActive}>Favicons</a>
+  <a href="/cv"${lCActive}>CV</a>
 </nav>`;
 }
 
@@ -2033,6 +2036,149 @@ app.post("/api/feedback", async (c) => {
         .run();
 
     return c.json({ ok: true }, 200, lCors);
+});
+
+// ---------------------------------------------------------------------------
+// GET /cv — owner-gated CV upload page.
+// ---------------------------------------------------------------------------
+
+/**
+ * Inputs: authenticated owner request.
+ * Outputs: HTML page with a link to the live CV and a PDF upload form.
+ * Logic: file input sends raw PDF body to POST /api/admin/cv via fetch.
+ */
+app.get("/cv", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    return c.html(
+        `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin — CV</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <style>${SHARED_STYLES}
+.cv-card {
+  background: #fff; border-radius: 8px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.08);
+  padding: 1.25rem; max-width: 480px;
+}
+.cv-card p { margin: 0 0 1rem; font-size: .9rem; color: #444; }
+.upload-row { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
+.upload-btn {
+  padding: .4rem .9rem; background: #111; color: #fff;
+  border: none; border-radius: 6px; font-size: .85rem; cursor: pointer;
+}
+.upload-btn:hover { background: #333; }
+.upload-btn:disabled { opacity: .5; cursor: default; }
+#upload-msg { font-size: .85rem; }
+.success { color: #2e7d32; }
+.error { color: #c0392b; }
+  </style>
+</head>
+<body>
+${nav("cv")}
+<h1>CV</h1>
+<p class="subtitle">Replace the PDF served at cv.coull.ai. The existing file
+  is overwritten in place.</p>
+<div class="cv-card" style="margin-top:1.25rem">
+  <p>
+    <a href="https://cv.coull.ai" target="_blank" rel="noopener noreferrer"
+       style="color:#111;font-weight:600">View current CV →</a>
+  </p>
+  <div class="upload-row">
+    <input type="file" id="cv-file" accept=".pdf"
+           style="font-size:.85rem">
+    <button class="upload-btn" id="upload-btn" onclick="uploadCv()">
+      Upload
+    </button>
+  </div>
+  <p id="upload-msg" style="margin:.75rem 0 0"></p>
+</div>
+<script>
+async function uploadCv() {
+  const lFile = document.getElementById('cv-file').files[0];
+  const lMsg  = document.getElementById('upload-msg');
+  const lBtn  = document.getElementById('upload-btn');
+  if (!lFile) { lMsg.textContent = 'Select a PDF first.'; lMsg.className = 'error'; return; }
+  lBtn.disabled = true;
+  lMsg.textContent = 'Uploading…';
+  lMsg.className = '';
+  try {
+    const lRes = await fetch('/api/admin/cv', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/pdf' },
+      body: lFile,
+    });
+    const lData = await lRes.json();
+    if (lRes.ok) {
+      lMsg.textContent = 'CV updated successfully.';
+      lMsg.className = 'success';
+    } else {
+      lMsg.textContent = lData.error ?? 'Upload failed.';
+      lMsg.className = 'error';
+    }
+  } catch (_) {
+    lMsg.textContent = 'Network error — please try again.';
+    lMsg.className = 'error';
+  }
+  lBtn.disabled = false;
+}
+</script>
+</body>
+</html>`,
+    );
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/cv — owner-gated CV replacement.
+// ---------------------------------------------------------------------------
+
+const CV_MAX_BYTES = 5 * 1024 * 1024; // 5 MB
+
+/**
+ * Inputs: raw PDF body with Content-Type: application/pdf.
+ * Outputs: { ok: true } on success; { error: string } (400) on validation
+ *   failure.
+ * Logic: validates content-type, size cap, and PDF magic bytes, then puts
+ *   the file to R2 under the fixed key used by the cv worker.
+ */
+app.post("/api/admin/cv", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    const lContentType = c.req.header("content-type") ?? "";
+    if (!lContentType.startsWith("application/pdf")) {
+        return c.json({ error: "Content-Type must be application/pdf" }, 400);
+    }
+
+    const lBody = await c.req.arrayBuffer();
+
+    if (lBody.byteLength === 0) {
+        return c.json({ error: "File is empty" }, 400);
+    }
+    if (lBody.byteLength > CV_MAX_BYTES) {
+        return c.json({ error: "File exceeds 5 MB limit" }, 400);
+    }
+
+    // Verify PDF magic bytes: %PDF (0x25 0x50 0x44 0x46)
+    const lMagic = new Uint8Array(lBody, 0, 4);
+    if (
+        lMagic[0] !== 0x25 ||
+        lMagic[1] !== 0x50 ||
+        lMagic[2] !== 0x44 ||
+        lMagic[3] !== 0x46
+    ) {
+        return c.json({ error: "File does not appear to be a valid PDF" }, 400);
+    }
+
+    await c.env.CV_BUCKET.put("Connor_Coull_CV.pdf", lBody, {
+        httpMetadata: { contentType: "application/pdf" },
+    });
+
+    return c.json({ ok: true });
 });
 
 export default app;

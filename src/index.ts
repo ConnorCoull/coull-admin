@@ -2,21 +2,37 @@
  * coull-admin: admin panel for *.coull.ai
  *
  * Routes:
- *   GET  /                           → redirect to /requests
- *   GET  /requests                   → access request management (owner-only)
- *   GET  /feedback                   → feedback viewer (owner-only)
- *   GET  /favicon                    → favicon manager (owner-only)
- *   GET  /api/admin/requests         → JSON list (owner-only)
+ *   GET  /                               → redirect to /requests
+ *   GET  /requests                       → access request management (owner-only)
+ *   GET  /feedback                       → feedback viewer (owner-only)
+ *   GET  /favicon                        → favicon manager (owner-only)
+ *   GET  /cv                             → CV upload (owner-only)
+ *   GET  /content                        → reading + recommendations manager (owner-only)
+ *   GET  /api/admin/requests             → JSON list (owner-only)
  *   POST /api/admin/requests/:id/approve
  *   POST /api/admin/requests/:id/decline
  *   POST /api/admin/revoke
- *   POST /api/admin/favicons/:site   → write favicon to KV (owner-only)
- *   DELETE /api/admin/favicons/:site → remove favicon from KV (owner-only)
- *   OPTIONS /api/feedback            → CORS preflight
- *   POST /api/feedback               → submit feedback (session-optional)
+ *   POST /api/admin/favicons/:site       → write favicon to KV (owner-only)
+ *   DELETE /api/admin/favicons/:site     → remove favicon from KV (owner-only)
+ *   POST /api/admin/reading              → add reading paper (owner-only)
+ *   DELETE /api/admin/reading/:id        → remove reading paper (owner-only)
+ *   POST /api/admin/recommendations      → add recommendation (owner-only)
+ *   PUT  /api/admin/recommendations/:id  → edit recommendation (owner-only)
+ *   DELETE /api/admin/recommendations/:id
+ *   OPTIONS /api/feedback                → CORS preflight
+ *   POST /api/feedback                   → submit feedback (session-optional)
+ *
+ * Banner (platform-wide announcement strip):
+ *   GET  /banner                         → banner manager page (owner-only)
+ *   GET  /banner.js                      → embeddable banner widget (public)
+ *   GET  /api/banner                     → resolved banner config (public, CORS)
+ *   PUT  /api/admin/banner/global        → set global banner (owner-only)
+ *   PUT  /api/admin/banner/:site         → set per-site banner (owner-only)
+ *   DELETE /api/admin/banner/:site       → clear per-site banner (owner-only)
  */
 
 import { type Context, Hono } from "hono";
+import { BANNER_SOURCE } from "./banner";
 import { validateFeedback } from "./lib/feedback-validate";
 import { escapeHtml } from "./lib/html";
 import { WIDGET_SOURCE } from "./widget";
@@ -29,6 +45,7 @@ type Env = {
     // Service Binding to coull-auth — avoids same-zone HTTP 522s in production.
     AUTH_SERVICE?: { fetch(request: Request): Promise<Response> };
     PLATFORM_ASSETS: KVNamespace;
+    CV_BUCKET: R2Bucket;
 };
 
 const app = new Hono<{ Bindings: Env }>();
@@ -82,6 +99,71 @@ app.get("/widget.js", (c) =>
         "Cache-Control": "public, max-age=300",
     }),
 );
+
+// GET /banner.js — embeddable platform banner for all coull.ai apps.
+// ---------------------------------------------------------------------------
+
+// Inputs: none. Outputs: the banner script with a JS content-type and a
+// short cache so banner updates propagate to all apps within minutes.
+app.get("/banner.js", (c) =>
+    c.body(BANNER_SOURCE, 200, {
+        "Content-Type": "text/javascript; charset=utf-8",
+        "Cache-Control": "public, max-age=300",
+    }),
+);
+
+// GET /api/banner — resolved banner config for the embedding widget.
+// ---------------------------------------------------------------------------
+
+// Inputs: ?site=<site-key> query param. Outputs: JSON { enabled, message }.
+// Logic: global config (platform_banner) wins when enabled; falls back to
+// per-site config (platform_banner:<site>); otherwise returns enabled:false.
+// Public — no auth required. CORS header added so cross-origin widgets can
+// read the response. Short cache so toggle changes propagate within ~1 min.
+app.get("/api/banner", async (c) => {
+    const lSite = (c.req.query("site") ?? "").trim().toLowerCase();
+
+    const lGlobalRaw = await c.env.PLATFORM_ASSETS.get("platform_banner");
+    if (lGlobalRaw) {
+        let lGlobal: { enabled?: boolean; message?: string } = {};
+        try {
+            lGlobal = JSON.parse(lGlobalRaw);
+        } catch (_) {}
+        if (lGlobal.enabled && lGlobal.message) {
+            return c.json({ enabled: true, message: lGlobal.message }, 200, {
+                "Cache-Control": "public, max-age=60",
+                "Access-Control-Allow-Origin": "*",
+            });
+        }
+    }
+
+    if (lSite) {
+        const lSiteRaw = await c.env.PLATFORM_ASSETS.get(
+            `platform_banner:${lSite}`,
+        );
+        if (lSiteRaw) {
+            let lSiteConf: { enabled?: boolean; message?: string } = {};
+            try {
+                lSiteConf = JSON.parse(lSiteRaw);
+            } catch (_) {}
+            if (lSiteConf.enabled && lSiteConf.message) {
+                return c.json(
+                    { enabled: true, message: lSiteConf.message },
+                    200,
+                    {
+                        "Cache-Control": "public, max-age=60",
+                        "Access-Control-Allow-Origin": "*",
+                    },
+                );
+            }
+        }
+    }
+
+    return c.json({ enabled: false }, 200, {
+        "Cache-Control": "public, max-age=60",
+        "Access-Control-Allow-Origin": "*",
+    });
+});
 
 // ---------------------------------------------------------------------------
 // Security headers — applied to every response.
@@ -225,14 +307,22 @@ async function checkIpRateLimit(
  * Inputs: active page name for nav highlighting.
  * Outputs: HTML nav string.
  */
-function nav(xiActive: "requests" | "feedback" | "favicon"): string {
+function nav(
+    xiActive: "requests" | "feedback" | "favicon" | "cv" | "content" | "banner",
+): string {
     const lRActive = xiActive === "requests" ? ' class="active"' : "";
     const lFActive = xiActive === "feedback" ? ' class="active"' : "";
     const lIActive = xiActive === "favicon" ? ' class="active"' : "";
+    const lCActive = xiActive === "cv" ? ' class="active"' : "";
+    const lNActive = xiActive === "content" ? ' class="active"' : "";
+    const lBActive = xiActive === "banner" ? ' class="active"' : "";
     return `<nav class="nav">
   <a href="/requests"${lRActive}>Requests</a>
   <a href="/feedback"${lFActive}>Feedback</a>
   <a href="/favicon"${lIActive}>Favicons</a>
+  <a href="/cv"${lCActive}>CV</a>
+  <a href="/content"${lNActive}>Content</a>
+  <a href="/banner"${lBActive}>Banner</a>
 </nav>`;
 }
 
@@ -2033,6 +2123,1094 @@ app.post("/api/feedback", async (c) => {
         .run();
 
     return c.json({ ok: true }, 200, lCors);
+});
+
+// ---------------------------------------------------------------------------
+// GET /cv — owner-gated CV upload page.
+// ---------------------------------------------------------------------------
+
+/**
+ * Inputs: authenticated owner request.
+ * Outputs: HTML page with a link to the live CV and a PDF upload form.
+ * Logic: file input sends raw PDF body to POST /api/admin/cv via fetch.
+ */
+app.get("/cv", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    return c.html(
+        `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin — CV</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <style>${SHARED_STYLES}
+.cv-card {
+  background: #fff; border-radius: 8px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.08);
+  padding: 1.25rem; max-width: 480px;
+}
+.cv-card p { margin: 0 0 1rem; font-size: .9rem; color: #444; }
+.upload-row { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
+.upload-btn {
+  padding: .4rem .9rem; background: #111; color: #fff;
+  border: none; border-radius: 6px; font-size: .85rem; cursor: pointer;
+}
+.upload-btn:hover { background: #333; }
+.upload-btn:disabled { opacity: .5; cursor: default; }
+#upload-msg { font-size: .85rem; }
+.success { color: #2e7d32; }
+.error { color: #c0392b; }
+  </style>
+</head>
+<body>
+${nav("cv")}
+<h1>CV</h1>
+<p class="subtitle">Replace the PDF served at cv.coull.ai. The existing file
+  is overwritten in place.</p>
+<div class="cv-card" style="margin-top:1.25rem">
+  <p>
+    <a href="https://cv.coull.ai" target="_blank" rel="noopener noreferrer"
+       style="color:#111;font-weight:600">View current CV →</a>
+  </p>
+  <div class="upload-row">
+    <input type="file" id="cv-file" accept=".pdf"
+           style="font-size:.85rem">
+    <button class="upload-btn" id="upload-btn" onclick="uploadCv()">
+      Upload
+    </button>
+  </div>
+  <p id="upload-msg" style="margin:.75rem 0 0"></p>
+</div>
+<script>
+async function uploadCv() {
+  const lFile = document.getElementById('cv-file').files[0];
+  const lMsg  = document.getElementById('upload-msg');
+  const lBtn  = document.getElementById('upload-btn');
+  if (!lFile) { lMsg.textContent = 'Select a PDF first.'; lMsg.className = 'error'; return; }
+  lBtn.disabled = true;
+  lMsg.textContent = 'Uploading…';
+  lMsg.className = '';
+  try {
+    const lRes = await fetch('/api/admin/cv', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/pdf' },
+      body: lFile,
+    });
+    const lData = await lRes.json();
+    if (lRes.ok) {
+      lMsg.textContent = 'CV updated successfully.';
+      lMsg.className = 'success';
+    } else {
+      lMsg.textContent = lData.error ?? 'Upload failed.';
+      lMsg.className = 'error';
+    }
+  } catch (_) {
+    lMsg.textContent = 'Network error — please try again.';
+    lMsg.className = 'error';
+  }
+  lBtn.disabled = false;
+}
+</script>
+</body>
+</html>`,
+    );
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/cv — owner-gated CV replacement.
+// ---------------------------------------------------------------------------
+
+const CV_MAX_BYTES = 5 * 1024 * 1024; // 5 MB
+
+/**
+ * Inputs: raw PDF body with Content-Type: application/pdf.
+ * Outputs: { ok: true } on success; { error: string } (400) on validation
+ *   failure.
+ * Logic: validates content-type, size cap, and PDF magic bytes, then puts
+ *   the file to R2 under the fixed key used by the cv worker.
+ */
+app.post("/api/admin/cv", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    const lContentType = c.req.header("content-type") ?? "";
+    if (!lContentType.startsWith("application/pdf")) {
+        return c.json({ error: "Content-Type must be application/pdf" }, 400);
+    }
+
+    const lBody = await c.req.arrayBuffer();
+
+    if (lBody.byteLength === 0) {
+        return c.json({ error: "File is empty" }, 400);
+    }
+    if (lBody.byteLength > CV_MAX_BYTES) {
+        return c.json({ error: "File exceeds 5 MB limit" }, 400);
+    }
+
+    // Verify PDF magic bytes: %PDF (0x25 0x50 0x44 0x46)
+    const lMagic = new Uint8Array(lBody, 0, 4);
+    if (
+        lMagic[0] !== 0x25 ||
+        lMagic[1] !== 0x50 ||
+        lMagic[2] !== 0x44 ||
+        lMagic[3] !== 0x46
+    ) {
+        return c.json({ error: "File does not appear to be a valid PDF" }, 400);
+    }
+
+    await c.env.CV_BUCKET.put("Connor_Coull_CV.pdf", lBody, {
+        httpMetadata: { contentType: "application/pdf" },
+    });
+
+    return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// GET /content — owner-gated reading list + recommendations manager.
+// ---------------------------------------------------------------------------
+
+/**
+ * Inputs: authenticated owner request.
+ * Outputs: HTML page with two panels: reading papers and recommendations.
+ * Logic: reads all papers (newest first) and all recommendations (oldest
+ *   first) from D1; the top 5 papers are marked as "live" on the homepage.
+ */
+app.get("/content", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    const [lPapers, lRecs] = await Promise.all([
+        c.env.DB.prepare(
+            "SELECT id, title, authors, year, href" +
+                " FROM reading_papers ORDER BY created_at DESC",
+        ).all<{
+            id: string;
+            title: string;
+            authors: string;
+            year: number;
+            href: string | null;
+        }>(),
+        c.env.DB.prepare(
+            "SELECT id, category, text" +
+                " FROM recommendations ORDER BY created_at ASC",
+        ).all<{ id: string; category: string; text: string }>(),
+    ]);
+
+    const lPaperRows = (lPapers.results ?? [])
+        .map((p, i) => {
+            const lLive =
+                i < 5
+                    ? `<span class="badge badge-custom" ` +
+                      `style="margin-left:.4rem">live</span>`
+                    : "";
+            const lHref = p.href
+                ? `<a href="${escapeHtml(p.href)}" target="_blank" ` +
+                  `rel="noopener noreferrer" ` +
+                  `style="color:#2e4a52;font-size:.8rem">↗</a> `
+                : "";
+            return (
+                `<tr id="paper-row-${escapeHtml(p.id)}">` +
+                `<td>${escapeHtml(p.title)}${lLive}</td>` +
+                `<td>${escapeHtml(p.authors)}</td>` +
+                `<td>${p.year}</td>` +
+                `<td>${lHref}</td>` +
+                `<td><button class="decline-btn" ` +
+                `onclick="deletePaper('${escapeHtml(p.id)}')">Delete</button></td>` +
+                `</tr>`
+            );
+        })
+        .join("");
+
+    const lRecRows = (lRecs.results ?? [])
+        .map((r) => {
+            return (
+                `<tr id="rec-row-${escapeHtml(r.id)}">` +
+                `<td class="rec-cat-cell">${escapeHtml(r.category)}</td>` +
+                `<td class="rec-text-cell">${escapeHtml(r.text)}</td>` +
+                `<td class="action-btns">` +
+                `<button class="approve-btn" ` +
+                `onclick="editRec('${escapeHtml(r.id)}','` +
+                `${escapeHtml(r.category)}','${escapeHtml(r.text)}'` +
+                `)">Edit</button>` +
+                `<button class="decline-btn" ` +
+                `onclick="deleteRec('${escapeHtml(r.id)}')">Delete</button>` +
+                `</td>` +
+                `</tr>`
+            );
+        })
+        .join("");
+
+    return c.html(
+        `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin — Content</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <style>${SHARED_STYLES}
+.content-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+  margin-top: 1rem;
+}
+@media (max-width: 900px) {
+  .content-grid { grid-template-columns: 1fr; }
+}
+.section-card {
+  background: #fff; border-radius: 8px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.08);
+  padding: 1.25rem; display: flex; flex-direction: column; gap: 1rem;
+}
+.section-card h2 { font-size: 1rem; margin: 0; }
+.section-card .hint { font-size: .8rem; color: #888; margin: 0; }
+.add-row {
+  display: grid; gap: .5rem;
+}
+.add-row label { font-size: .8rem; color: #555; }
+.add-row input {
+  width: 100%; padding: .4rem .6rem;
+  border: 1px solid #ddd; border-radius: 6px;
+  font-size: .9rem; background: #fafafa;
+}
+.add-row input:focus { outline: 2px solid #111; border-color: transparent; }
+.add-submit {
+  padding: .4rem .9rem; background: #111; color: #fff;
+  border: none; border-radius: 6px; font-size: .85rem; cursor: pointer;
+  align-self: flex-end; margin-top: .25rem;
+}
+.add-submit:hover { background: #333; }
+.add-submit:disabled { opacity: .5; cursor: default; }
+.form-err { color: #c0392b; font-size: .8rem; min-height: 1.1rem; }
+.papers-table td:nth-child(3) { white-space: nowrap; }
+.edit-modal-overlay {
+  display: none; position: fixed; inset: 0;
+  background: rgba(0,0,0,.35); z-index: 100;
+  align-items: center; justify-content: center;
+}
+.edit-modal-overlay.open { display: flex; }
+.edit-modal {
+  background: #fff; border-radius: 10px; padding: 1.5rem;
+  width: min(420px, 90vw); box-shadow: 0 4px 24px rgba(0,0,0,.18);
+}
+.edit-modal h3 { margin: 0 0 1rem; font-size: 1rem; }
+.edit-modal .add-row { margin-bottom: .75rem; }
+.modal-btns { display: flex; gap: .5rem; justify-content: flex-end; }
+  </style>
+</head>
+<body>
+${nav("content")}
+<h1>Content</h1>
+<p class="subtitle">Manage the homepage reading list and recommendations.
+  Changes go live within ~1 minute (CDN cache).</p>
+
+<div class="content-grid">
+
+  <!-- ── Currently Reading ─────────────────────────── -->
+  <div class="section-card">
+    <div>
+      <h2>Currently Reading</h2>
+      <p class="hint">Top 5 (marked <strong>live</strong>) appear on the
+        homepage. Newest added first.</p>
+    </div>
+
+    <div class="add-row" id="paper-form">
+      <label for="p-title">Title</label>
+      <input id="p-title" type="text" placeholder="Attention Is All You Need">
+      <label for="p-authors">Authors</label>
+      <input id="p-authors" type="text" placeholder="Vaswani et al.">
+      <label for="p-year">Year</label>
+      <input id="p-year" type="number" placeholder="2017"
+             min="1900" max="2100" style="max-width:120px">
+      <label for="p-href">Link (optional)</label>
+      <input id="p-href" type="url" placeholder="https://arxiv.org/abs/…">
+      <p class="form-err" id="paper-err"></p>
+      <button class="add-submit" onclick="addPaper()">Add Paper</button>
+    </div>
+
+    <div class="table-wrap">
+      <table class="papers-table">
+        <thead>
+          <tr>
+            <th>Title</th><th>Authors</th><th>Year</th>
+            <th>Link</th><th></th>
+          </tr>
+        </thead>
+        <tbody id="papers-tbody">${lPaperRows}</tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ── Recommendations ───────────────────────────── -->
+  <div class="section-card">
+    <div>
+      <h2>Recommendations</h2>
+      <p class="hint">All entries appear on the homepage in the order added.
+        Category is the label (e.g. Album, Film).</p>
+    </div>
+
+    <div class="add-row" id="rec-form">
+      <label for="r-cat">Category</label>
+      <input id="r-cat" type="text" placeholder="Album">
+      <label for="r-text">Recommendation</label>
+      <input id="r-text" type="text"
+             placeholder="WOR$T GIRL IN AMERICA by Slayyyter">
+      <p class="form-err" id="rec-err"></p>
+      <button class="add-submit" onclick="addRec()">Add</button>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Category</th><th>Text</th><th></th></tr>
+        </thead>
+        <tbody id="recs-tbody">${lRecRows}</tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<!-- Edit-recommendation modal -->
+<div class="edit-modal-overlay" id="rec-modal">
+  <div class="edit-modal">
+    <h3>Edit recommendation</h3>
+    <input type="hidden" id="edit-rec-id">
+    <div class="add-row">
+      <label for="edit-rec-cat">Category</label>
+      <input id="edit-rec-cat" type="text">
+      <label for="edit-rec-text">Text</label>
+      <input id="edit-rec-text" type="text">
+      <p class="form-err" id="edit-rec-err"></p>
+    </div>
+    <div class="modal-btns">
+      <button class="archive-btn" onclick="closeRecModal()">Cancel</button>
+      <button class="approve-btn" onclick="saveRec()">Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Paper helpers ────────────────────────────────────────────────────────────
+
+async function addPaper() {
+  const lTitle   = document.getElementById('p-title').value.trim();
+  const lAuthors = document.getElementById('p-authors').value.trim();
+  const lYear    = parseInt(document.getElementById('p-year').value, 10);
+  const lHref    = document.getElementById('p-href').value.trim();
+  const lErr     = document.getElementById('paper-err');
+  const lBtn     = document.querySelector('#paper-form .add-submit');
+
+  if (!lTitle)   { lErr.textContent = 'Title is required.'; return; }
+  if (!lAuthors) { lErr.textContent = 'Authors is required.'; return; }
+  if (!lYear || lYear < 1900 || lYear > 2100) {
+    lErr.textContent = 'Year must be between 1900 and 2100.'; return;
+  }
+  if (lHref && !/^https?:\\/\\//.test(lHref)) {
+    lErr.textContent = 'Link must start with http:// or https://.'; return;
+  }
+  lErr.textContent = '';
+  lBtn.disabled = true;
+
+  try {
+    const lRes = await fetch('/api/admin/reading', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: lTitle, authors: lAuthors,
+        year: lYear, href: lHref || null }),
+    });
+    const lData = await lRes.json();
+    if (!lRes.ok) { lErr.textContent = lData.error ?? 'Failed.'; return; }
+
+    // Prepend new row to table — it's the newest, so it goes first.
+    const lLive = document.querySelectorAll('#papers-tbody tr').length < 5
+      ? '<span class="badge badge-custom" style="margin-left:.4rem">live</span>'
+      : '';
+    const lLinkCell = lHref
+      ? '<a href="' + escHtml(lHref) + '" target="_blank" ' +
+        'rel="noopener noreferrer" style="color:#2e4a52;font-size:.8rem">↗</a>'
+      : '';
+    const lRow = '<tr id="paper-row-' + escHtml(lData.id) + '">' +
+      '<td>' + escHtml(lTitle) + lLive + '</td>' +
+      '<td>' + escHtml(lAuthors) + '</td>' +
+      '<td>' + lYear + '</td>' +
+      '<td>' + lLinkCell + '</td>' +
+      '<td><button class="decline-btn" ' +
+      'onclick="deletePaper(\\'' + escHtml(lData.id) + '\\')">Delete</button></td>' +
+      '</tr>';
+    document.getElementById('papers-tbody').insertAdjacentHTML('afterbegin', lRow);
+
+    // Refresh live badges (only top 5 should have them).
+    refreshLiveBadges();
+
+    // Clear form
+    ['p-title','p-authors','p-year','p-href'].forEach(id =>
+      document.getElementById(id).value = '');
+  } catch (_) {
+    lErr.textContent = 'Network error — please try again.';
+  }
+  lBtn.disabled = false;
+}
+
+async function deletePaper(xiId) {
+  if (!confirm('Delete this paper?')) return;
+  try {
+    const lRes = await fetch('/api/admin/reading/' + encodeURIComponent(xiId),
+      { method: 'DELETE' });
+    if (lRes.ok) {
+      document.getElementById('paper-row-' + xiId)?.remove();
+      refreshLiveBadges();
+    } else {
+      const lData = await lRes.json();
+      alert(lData.error ?? 'Delete failed.');
+    }
+  } catch (_) { alert('Network error.'); }
+}
+
+/**
+ * Recalculates "live" badges so the first 5 rows in DOM show the badge
+ * and others do not, after any add/delete.
+ */
+function refreshLiveBadges() {
+  const lRows = document.querySelectorAll('#papers-tbody tr');
+  lRows.forEach((lRow, i) => {
+    const lTitleCell = lRow.querySelector('td:first-child');
+    let lBadge = lTitleCell.querySelector('.badge-custom');
+    if (i < 5) {
+      if (!lBadge) {
+        lBadge = document.createElement('span');
+        lBadge.className = 'badge badge-custom';
+        lBadge.style.marginLeft = '.4rem';
+        lBadge.textContent = 'live';
+        lTitleCell.appendChild(lBadge);
+      }
+    } else {
+      lBadge?.remove();
+    }
+  });
+}
+
+// ── Recommendation helpers ───────────────────────────────────────────────────
+
+async function addRec() {
+  const lCat  = document.getElementById('r-cat').value.trim();
+  const lText = document.getElementById('r-text').value.trim();
+  const lErr  = document.getElementById('rec-err');
+  const lBtn  = document.querySelector('#rec-form .add-submit');
+
+  if (!lCat)  { lErr.textContent = 'Category is required.'; return; }
+  if (!lText) { lErr.textContent = 'Text is required.'; return; }
+  lErr.textContent = '';
+  lBtn.disabled = true;
+
+  try {
+    const lRes = await fetch('/api/admin/recommendations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ category: lCat, text: lText }),
+    });
+    const lData = await lRes.json();
+    if (!lRes.ok) { lErr.textContent = lData.error ?? 'Failed.'; return; }
+
+    const lRow = '<tr id="rec-row-' + escHtml(lData.id) + '">' +
+      '<td class="rec-cat-cell">' + escHtml(lCat) + '</td>' +
+      '<td class="rec-text-cell">' + escHtml(lText) + '</td>' +
+      '<td class="action-btns">' +
+      '<button class="approve-btn" onclick="editRec(\\'' +
+      escHtml(lData.id) + '\\',\\'' + escJs(lCat) + '\\',\\'' +
+      escJs(lText) + '\\')">Edit</button>' +
+      '<button class="decline-btn" onclick="deleteRec(\\'' +
+      escHtml(lData.id) + '\\')">Delete</button>' +
+      '</td></tr>';
+    document.getElementById('recs-tbody').insertAdjacentHTML('beforeend', lRow);
+
+    document.getElementById('r-cat').value = '';
+    document.getElementById('r-text').value = '';
+  } catch (_) {
+    lErr.textContent = 'Network error — please try again.';
+  }
+  lBtn.disabled = false;
+}
+
+function editRec(xiId, xiCat, xiText) {
+  document.getElementById('edit-rec-id').value  = xiId;
+  document.getElementById('edit-rec-cat').value  = xiCat;
+  document.getElementById('edit-rec-text').value = xiText;
+  document.getElementById('edit-rec-err').textContent = '';
+  document.getElementById('rec-modal').classList.add('open');
+}
+
+function closeRecModal() {
+  document.getElementById('rec-modal').classList.remove('open');
+}
+
+async function saveRec() {
+  const lId   = document.getElementById('edit-rec-id').value;
+  const lCat  = document.getElementById('edit-rec-cat').value.trim();
+  const lText = document.getElementById('edit-rec-text').value.trim();
+  const lErr  = document.getElementById('edit-rec-err');
+
+  if (!lCat)  { lErr.textContent = 'Category is required.'; return; }
+  if (!lText) { lErr.textContent = 'Text is required.'; return; }
+  lErr.textContent = '';
+
+  try {
+    const lRes = await fetch(
+      '/api/admin/recommendations/' + encodeURIComponent(lId),
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ category: lCat, text: lText }),
+      },
+    );
+    const lData = await lRes.json();
+    if (!lRes.ok) { lErr.textContent = lData.error ?? 'Save failed.'; return; }
+
+    // Update row in DOM
+    const lRow = document.getElementById('rec-row-' + lId);
+    if (lRow) {
+      lRow.querySelector('.rec-cat-cell').textContent  = lCat;
+      lRow.querySelector('.rec-text-cell').textContent = lText;
+      // Refresh onclick attrs with updated values
+      const lEditBtn = lRow.querySelector('.approve-btn');
+      lEditBtn.setAttribute('onclick',
+        "editRec('" + escHtml(lId) + "','" + escJs(lCat) +
+        "','" + escJs(lText) + "')");
+    }
+    closeRecModal();
+  } catch (_) {
+    lErr.textContent = 'Network error — please try again.';
+  }
+}
+
+async function deleteRec(xiId) {
+  if (!confirm('Delete this recommendation?')) return;
+  try {
+    const lRes = await fetch(
+      '/api/admin/recommendations/' + encodeURIComponent(xiId),
+      { method: 'DELETE' },
+    );
+    if (lRes.ok) {
+      document.getElementById('rec-row-' + xiId)?.remove();
+    } else {
+      const lData = await lRes.json();
+      alert(lData.error ?? 'Delete failed.');
+    }
+  } catch (_) { alert('Network error.'); }
+}
+
+// ── Utilities ────────────────────────────────────────────────────────────────
+
+/** Escape a string for safe insertion into HTML text content. */
+function escHtml(xiStr) {
+  return String(xiStr)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/** Escape a string for safe embedding in a JS string literal (inside quotes). */
+function escJs(xiStr) {
+  return String(xiStr).replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'");
+}
+
+// Close modal when clicking the overlay backdrop.
+document.getElementById('rec-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeRecModal();
+});
+</script>
+</body>
+</html>`,
+    );
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/reading — add a reading paper.
+// ---------------------------------------------------------------------------
+
+const HREF_RE = /^https?:\/\/.+/;
+
+/**
+ * Inputs: JSON body { title, authors, year, href? }.
+ * Outputs: { ok: true, id: string } on success; { error } (400) on
+ *   validation failure.
+ * Logic: validates all fields, then inserts into reading_papers with a new
+ *   UUID and the current timestamp as created_at (ordering key).
+ */
+app.post("/api/admin/reading", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    const lBody = await c.req.json<{
+        title?: unknown;
+        authors?: unknown;
+        year?: unknown;
+        href?: unknown;
+    }>();
+
+    const lTitle = typeof lBody.title === "string" ? lBody.title.trim() : "";
+    const lAuthors =
+        typeof lBody.authors === "string" ? lBody.authors.trim() : "";
+    const lYear = typeof lBody.year === "number" ? Math.trunc(lBody.year) : NaN;
+    const lHref =
+        lBody.href == null
+            ? null
+            : typeof lBody.href === "string"
+              ? lBody.href.trim()
+              : "";
+
+    if (!lTitle) return c.json({ error: "title is required" }, 400);
+    if (!lAuthors) return c.json({ error: "authors is required" }, 400);
+    if (!Number.isFinite(lYear) || lYear < 1900 || lYear > 2100) {
+        return c.json({ error: "year must be an integer 1900–2100" }, 400);
+    }
+    if (lHref !== null && !HREF_RE.test(lHref)) {
+        return c.json(
+            { error: "href must start with http:// or https://" },
+            400,
+        );
+    }
+
+    const lId = crypto.randomUUID();
+    await c.env.DB.prepare(
+        "INSERT INTO reading_papers (id, title, authors, year, href, created_at)" +
+            " VALUES (?, ?, ?, ?, ?, ?)",
+    )
+        .bind(lId, lTitle, lAuthors, lYear, lHref, Date.now())
+        .run();
+
+    return c.json({ ok: true, id: lId });
+});
+
+// ---------------------------------------------------------------------------
+// DELETE /api/admin/reading/:id — remove a reading paper.
+// ---------------------------------------------------------------------------
+
+/**
+ * Inputs: paper id path param.
+ * Outputs: { ok: true } on success; { error } (404) if not found.
+ * Logic: deletes the row; treats 0 affected rows as 404.
+ */
+app.delete("/api/admin/reading/:id", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    const lId = c.req.param("id");
+    const lResult = await c.env.DB.prepare(
+        "DELETE FROM reading_papers WHERE id = ?",
+    )
+        .bind(lId)
+        .run();
+
+    if ((lResult.meta.changes ?? 0) === 0) {
+        return c.json({ error: "Not found" }, 404);
+    }
+    return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/recommendations — add a recommendation.
+// ---------------------------------------------------------------------------
+
+/**
+ * Inputs: JSON body { category, text }.
+ * Outputs: { ok: true, id: string } on success; { error } (400) on
+ *   validation failure.
+ * Logic: validates non-empty fields, inserts with a new UUID and current
+ *   timestamp for both created_at (ordering) and updated_at.
+ */
+app.post("/api/admin/recommendations", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    const lBody = await c.req.json<{
+        category?: unknown;
+        text?: unknown;
+    }>();
+
+    const lCategory =
+        typeof lBody.category === "string" ? lBody.category.trim() : "";
+    const lText = typeof lBody.text === "string" ? lBody.text.trim() : "";
+
+    if (!lCategory) return c.json({ error: "category is required" }, 400);
+    if (!lText) return c.json({ error: "text is required" }, 400);
+
+    const lId = crypto.randomUUID();
+    const lNow = Date.now();
+    await c.env.DB.prepare(
+        "INSERT INTO recommendations (id, category, text, created_at, updated_at)" +
+            " VALUES (?, ?, ?, ?, ?)",
+    )
+        .bind(lId, lCategory, lText, lNow, lNow)
+        .run();
+
+    return c.json({ ok: true, id: lId });
+});
+
+// ---------------------------------------------------------------------------
+// PUT /api/admin/recommendations/:id — edit a recommendation.
+// ---------------------------------------------------------------------------
+
+/**
+ * Inputs: recommendation id path param; JSON body { category, text }.
+ * Outputs: { ok: true } on success; { error } (400/404) on failure.
+ * Logic: validates fields, updates the row and bumps updated_at.
+ */
+app.put("/api/admin/recommendations/:id", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    const lId = c.req.param("id");
+    const lBody = await c.req.json<{
+        category?: unknown;
+        text?: unknown;
+    }>();
+
+    const lCategory =
+        typeof lBody.category === "string" ? lBody.category.trim() : "";
+    const lText = typeof lBody.text === "string" ? lBody.text.trim() : "";
+
+    if (!lCategory) return c.json({ error: "category is required" }, 400);
+    if (!lText) return c.json({ error: "text is required" }, 400);
+
+    const lResult = await c.env.DB.prepare(
+        "UPDATE recommendations SET category = ?, text = ?, updated_at = ?" +
+            " WHERE id = ?",
+    )
+        .bind(lCategory, lText, Date.now(), lId)
+        .run();
+
+    if ((lResult.meta.changes ?? 0) === 0) {
+        return c.json({ error: "Not found" }, 404);
+    }
+    return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// DELETE /api/admin/recommendations/:id — remove a recommendation.
+// ---------------------------------------------------------------------------
+
+/**
+ * Inputs: recommendation id path param.
+ * Outputs: { ok: true } on success; { error } (404) if not found.
+ * Logic: deletes the row; treats 0 affected rows as 404.
+ */
+app.delete("/api/admin/recommendations/:id", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    const lId = c.req.param("id");
+    const lResult = await c.env.DB.prepare(
+        "DELETE FROM recommendations WHERE id = ?",
+    )
+        .bind(lId)
+        .run();
+
+    if ((lResult.meta.changes ?? 0) === 0) {
+        return c.json({ error: "Not found" }, 404);
+    }
+    return c.json({ ok: true });
+});
+
+// ===========================================================================
+// Banner — platform-wide announcement strip
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// GET /banner — owner-gated banner manager page.
+// ---------------------------------------------------------------------------
+
+/**
+ * Inputs: none (reads KV directly for current config).
+ * Outputs: HTML page with a global section and a per-site section for each
+ *   KNOWN_SITES entry. Inline JS handles save/clear without page reloads.
+ * Logic: renders current stored values server-side so the form fields are
+ *   pre-populated. The global banner wins over per-site when enabled.
+ */
+app.get("/banner", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    // Fetch global config.
+    const lGlobalRaw = await c.env.PLATFORM_ASSETS.get("platform_banner");
+    let lGlobal: { enabled?: boolean; message?: string } = {};
+    try {
+        if (lGlobalRaw) lGlobal = JSON.parse(lGlobalRaw);
+    } catch (_) {}
+
+    // Fetch per-site configs.
+    const lSiteConfigs: Record<
+        string,
+        { enabled?: boolean; message?: string }
+    > = {};
+    for (const lSite of KNOWN_SITES) {
+        const lRaw = await c.env.PLATFORM_ASSETS.get(
+            `platform_banner:${lSite}`,
+        );
+        lSiteConfigs[lSite] = {};
+        try {
+            if (lRaw) lSiteConfigs[lSite] = JSON.parse(lRaw);
+        } catch (_) {}
+    }
+
+    const lGlobalChecked = lGlobal.enabled ? " checked" : "";
+    const lGlobalMsg = escapeHtml(lGlobal.message ?? "");
+
+    const lSiteRowsHtml = KNOWN_SITES.map((lSite) => {
+        const lConf = lSiteConfigs[lSite];
+        const lChecked = lConf.enabled ? " checked" : "";
+        const lMsg = escapeHtml(lConf.message ?? "");
+        return (
+            `<tr id="row-${lSite}">` +
+            `<td><code>${escapeHtml(lSite)}</code></td>` +
+            `<td>` +
+            `<input type="checkbox" id="en-${lSite}"${lChecked}` +
+            ` aria-label="Enabled for ${escapeHtml(lSite)}">` +
+            `</td>` +
+            `<td>` +
+            `<input type="text" id="msg-${lSite}" value="${lMsg}"` +
+            ` maxlength="300" placeholder="Per-site message…"` +
+            ` style="width:100%;padding:.25rem .4rem;font-size:.85rem;` +
+            `border:1px solid #e0e0e0;border-radius:4px">` +
+            `</td>` +
+            `<td class="action-btns">` +
+            `<button class="approve-btn"` +
+            ` onclick="saveSite('${lSite}',this)">Save</button>` +
+            `<button class="decline-btn"` +
+            ` onclick="clearSite('${lSite}',this)">Clear</button>` +
+            `</td>` +
+            `</tr>`
+        );
+    }).join("");
+
+    return c.html(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Banner — coull admin</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <style>${SHARED_STYLES}</style>
+</head>
+<body>
+<h1>coull admin</h1>
+${nav("banner")}
+
+<section class="add-form" style="margin-bottom:1.5rem">
+  <h2 style="margin-top:0">Global banner</h2>
+  <p style="font-size:.85rem;color:#666;margin-top:0">
+    When the global banner is <strong>enabled</strong> it overrides any
+    per-site config and appears on every app. Use it for platform-wide
+    announcements (services down, new deploy, etc.).
+  </p>
+  <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:.75rem">
+    <label style="display:flex;align-items:center;gap:.4rem;font-size:.9rem">
+      <input type="checkbox" id="global-enabled"${lGlobalChecked}>
+      Enabled
+    </label>
+  </div>
+  <div style="display:flex;gap:.5rem;align-items:flex-start">
+    <input type="text" id="global-msg" value="${lGlobalMsg}"
+      maxlength="300" placeholder="Global announcement message…"
+      style="flex:1;padding:.35rem .5rem;font-size:.9rem;
+             border:1px solid #e0e0e0;border-radius:4px">
+    <button class="approve-btn" onclick="saveGlobal(this)">Save</button>
+  </div>
+  <p id="global-status" style="font-size:.8rem;margin:.4rem 0 0;min-height:1.2em"></p>
+</section>
+
+<section class="add-form">
+  <h2 style="margin-top:0">Per-site banners</h2>
+  <p style="font-size:.85rem;color:#666;margin-top:0">
+    Only shown when the global banner is <strong>disabled</strong>.
+    Clear a site entry to fall back to the global state.
+  </p>
+  <table style="width:100%;border-collapse:collapse">
+    <thead>
+      <tr>
+        <th style="text-align:left;padding:.4rem .5rem;font-size:.8rem;
+                   color:#888;font-weight:500;border-bottom:1px solid #e0e0e0">
+          Site
+        </th>
+        <th style="text-align:left;padding:.4rem .5rem;font-size:.8rem;
+                   color:#888;font-weight:500;border-bottom:1px solid #e0e0e0">
+          Enabled
+        </th>
+        <th style="text-align:left;padding:.4rem .5rem;font-size:.8rem;
+                   color:#888;font-weight:500;border-bottom:1px solid #e0e0e0">
+          Message
+        </th>
+        <th style="text-align:left;padding:.4rem .5rem;font-size:.8rem;
+                   color:#888;font-weight:500;border-bottom:1px solid #e0e0e0">
+          Actions
+        </th>
+      </tr>
+    </thead>
+    <tbody id="site-tbody">${lSiteRowsHtml}</tbody>
+  </table>
+</section>
+
+<script>
+  async function saveGlobal(btn) {
+    btn.disabled = true;
+    const enabled = document.getElementById('global-enabled').checked;
+    const message = document.getElementById('global-msg').value.trim();
+    const status = document.getElementById('global-status');
+    const res = await fetch('/api/admin/banner/global', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled, message }),
+    });
+    if (res.ok) {
+      status.style.color = '#27ae60';
+      status.textContent = 'Saved.';
+    } else {
+      const body = await res.json().catch(() => ({}));
+      status.style.color = '#c0392b';
+      status.textContent = body.error || 'Save failed.';
+    }
+    btn.disabled = false;
+    setTimeout(function() { status.textContent = ''; }, 3000);
+  }
+
+  async function saveSite(site, btn) {
+    btn.disabled = true;
+    const enabled = document.getElementById('en-' + site).checked;
+    const message = document.getElementById('msg-' + site).value.trim();
+    const res = await fetch('/api/admin/banner/' + encodeURIComponent(site), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled, message }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      alert(body.error || 'Save failed.');
+    }
+    btn.disabled = false;
+  }
+
+  async function clearSite(site, btn) {
+    if (!confirm('Clear banner config for "' + site + '"?')) return;
+    btn.disabled = true;
+    const res = await fetch('/api/admin/banner/' + encodeURIComponent(site), {
+      method: 'DELETE',
+    });
+    if (res.ok) {
+      document.getElementById('en-' + site).checked = false;
+      document.getElementById('msg-' + site).value = '';
+    } else {
+      alert('Clear failed.');
+    }
+    btn.disabled = false;
+  }
+</script>
+</body>
+</html>`);
+});
+
+// ---------------------------------------------------------------------------
+// PUT /api/admin/banner/global — write the global banner config.
+// ---------------------------------------------------------------------------
+
+/**
+ * Inputs: JSON body { enabled: boolean, message: string }.
+ * Outputs: { ok: true } on success; { error } (400) on validation failure.
+ * Logic: trims message; enforces 300-char cap; writes to KV as JSON.
+ */
+app.put("/api/admin/banner/global", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    const lBody = await c.req.json<{
+        enabled?: unknown;
+        message?: unknown;
+    }>();
+    if (typeof lBody.enabled !== "boolean") {
+        return c.json({ error: "enabled must be a boolean" }, 400);
+    }
+    const lMessage =
+        typeof lBody.message === "string" ? lBody.message.trim() : "";
+    if (lMessage.length > 300) {
+        return c.json(
+            { error: "message must be 300 characters or fewer" },
+            400,
+        );
+    }
+
+    await c.env.PLATFORM_ASSETS.put(
+        "platform_banner",
+        JSON.stringify({ enabled: lBody.enabled, message: lMessage }),
+    );
+    return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// PUT /api/admin/banner/:site — write a per-site banner config.
+// ---------------------------------------------------------------------------
+
+/**
+ * Inputs: site path param; JSON body { enabled: boolean, message: string }.
+ * Outputs: { ok: true } on success; { error } (400) on validation failure.
+ * Logic: validates site key against SITE_RE; trims message; writes to KV.
+ */
+app.put("/api/admin/banner/:site", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    const lSite = c.req.param("site");
+    if (!SITE_RE.test(lSite)) {
+        return c.json({ error: "Invalid site name" }, 400);
+    }
+
+    const lBody = await c.req.json<{
+        enabled?: unknown;
+        message?: unknown;
+    }>();
+    if (typeof lBody.enabled !== "boolean") {
+        return c.json({ error: "enabled must be a boolean" }, 400);
+    }
+    const lMessage =
+        typeof lBody.message === "string" ? lBody.message.trim() : "";
+    if (lMessage.length > 300) {
+        return c.json(
+            { error: "message must be 300 characters or fewer" },
+            400,
+        );
+    }
+
+    await c.env.PLATFORM_ASSETS.put(
+        `platform_banner:${lSite}`,
+        JSON.stringify({ enabled: lBody.enabled, message: lMessage }),
+    );
+    return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// DELETE /api/admin/banner/:site — remove a per-site banner config.
+// ---------------------------------------------------------------------------
+
+/**
+ * Inputs: site path param.
+ * Outputs: { ok: true }.
+ * Logic: deletes the KV key; idempotent (missing key is not an error).
+ */
+app.delete("/api/admin/banner/:site", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    const lSite = c.req.param("site");
+    if (!SITE_RE.test(lSite)) {
+        return c.json({ error: "Invalid site name" }, 400);
+    }
+
+    await c.env.PLATFORM_ASSETS.delete(`platform_banner:${lSite}`);
+    return c.json({ ok: true });
 });
 
 export default app;

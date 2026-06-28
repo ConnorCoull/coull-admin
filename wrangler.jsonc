@@ -28,6 +28,12 @@
             "id": "704b5cda48f74f369099bf6661f8d3e7"
         }
     ],
+    "r2_buckets": [
+        {
+            "binding": "CV_BUCKET",
+            "bucket_name": "coull-assets"
+        }
+    ],
     "services": [
         {
             // Direct Worker-to-Worker binding — avoids same-zone HTTP 522s.

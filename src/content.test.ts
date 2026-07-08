@@ -41,13 +41,18 @@ interface D1MockOpts {
     firstRow?: unknown;
     // Number of affected rows for .run() (default: 1)
     changes?: number;
+    // Records each .batch() call's statement count, for assertions
+    batchCalls?: number[];
 }
 
 /**
  * Inputs: options controlling what the D1 mock returns.
  * Outputs: a minimal D1Database-compatible mock.
  * Logic: every prepare().bind() chain returns the configured values so
- *   tests can verify route logic without touching a real database.
+ *   tests can verify route logic without touching a real database. .batch()
+ *   just records how many statements it was given (via opts.batchCalls) and
+ *   resolves each with a success result — real ordering isn't needed since
+ *   routes bind the target values before batching.
  */
 function makeDb(opts: D1MockOpts = {}): D1Database {
     const lChanges = opts.changes ?? 1;
@@ -81,6 +86,13 @@ function makeDb(opts: D1MockOpts = {}): D1Database {
                 },
             };
         },
+        async batch(xiStatements: unknown[]) {
+            opts.batchCalls?.push(xiStatements.length);
+            return xiStatements.map(() => ({
+                success: true,
+                meta: { changes: 1 },
+            }));
+        },
     } as unknown as D1Database;
 }
 
@@ -111,6 +123,45 @@ async function req(
             OWNER_EMAIL,
             AUTH_SERVICE: makeAuthService(xiEmail),
             AUTH_URL: "https://auth.coull.ai",
+        },
+    );
+}
+
+/**
+ * Inputs: none.
+ * Outputs: a minimal KVNamespace mock.
+ * Logic: get()/list() return empty results — enough for admin GET pages to
+ *   render their "nothing configured yet" state without throwing.
+ */
+function makeKv(): KVNamespace {
+    return {
+        async get() {
+            return null;
+        },
+        async list() {
+            return { keys: [], list_complete: true, cacheStatus: null };
+        },
+        async put() {},
+        async delete() {},
+    } as unknown as KVNamespace;
+}
+
+/**
+ * Inputs: admin page path (e.g. "/content").
+ * Outputs: Hono Response for a GET as the owner, with all bindings mocked.
+ * Logic: used to verify a page renders and includes the shared toast helper,
+ *   not to exercise any route-specific query logic.
+ */
+async function pageReq(xiUrl: string) {
+    return app.request(
+        xiUrl,
+        { method: "GET" },
+        {
+            DB: makeDb(),
+            OWNER_EMAIL,
+            AUTH_SERVICE: makeAuthService(OWNER_EMAIL),
+            AUTH_URL: "https://auth.coull.ai",
+            PLATFORM_ASSETS: makeKv(),
         },
     );
 }
@@ -497,4 +548,148 @@ describe("DELETE /api/admin/recommendations/:id", () => {
         );
         expect(lRes.status).toBe(404);
     });
+});
+
+describe("POST /api/admin/recommendations/reorder", () => {
+    // ── Standard cases ───────────────────────────────────────────────────
+
+    it("accepts an id list and writes each as a sort_order via batch", async () => {
+        const lBatchCalls: number[] = [];
+        const lRes = await req(
+            "/api/admin/recommendations/reorder",
+            "POST",
+            { ids: ["rec-2", "rec-1", "rec-3"] },
+            OWNER_EMAIL,
+            makeDb({ batchCalls: lBatchCalls }),
+        );
+        expect(lRes.status).toBe(200);
+        const lData = await lRes.json();
+        expect(lData.ok).toBe(true);
+        // One UPDATE statement per id, batched in a single call.
+        expect(lBatchCalls).toEqual([3]);
+    });
+
+    it("accepts a single-id list", async () => {
+        const lRes = await req(
+            "/api/admin/recommendations/reorder",
+            "POST",
+            { ids: ["only-one"] },
+            OWNER_EMAIL,
+        );
+        expect(lRes.status).toBe(200);
+    });
+
+    // ── Incorrect cases ──────────────────────────────────────────────────
+
+    it("returns 400 when ids is missing", async () => {
+        const lRes = await req(
+            "/api/admin/recommendations/reorder",
+            "POST",
+            {},
+            OWNER_EMAIL,
+        );
+        expect(lRes.status).toBe(400);
+    });
+
+    it("returns 400 when ids is an empty array", async () => {
+        const lRes = await req(
+            "/api/admin/recommendations/reorder",
+            "POST",
+            { ids: [] },
+            OWNER_EMAIL,
+        );
+        expect(lRes.status).toBe(400);
+    });
+
+    it("returns 400 when ids is not an array", async () => {
+        const lRes = await req(
+            "/api/admin/recommendations/reorder",
+            "POST",
+            { ids: "rec-1" },
+            OWNER_EMAIL,
+        );
+        expect(lRes.status).toBe(400);
+    });
+
+    it("returns 400 when ids contains a non-string element", async () => {
+        const lRes = await req(
+            "/api/admin/recommendations/reorder",
+            "POST",
+            { ids: ["rec-1", 42] },
+            OWNER_EMAIL,
+        );
+        expect(lRes.status).toBe(400);
+    });
+
+    it("returns 400 when ids contains an empty string", async () => {
+        const lRes = await req(
+            "/api/admin/recommendations/reorder",
+            "POST",
+            { ids: ["rec-1", ""] },
+            OWNER_EMAIL,
+        );
+        expect(lRes.status).toBe(400);
+    });
+
+    // ── Auth cases ───────────────────────────────────────────────────────
+
+    it("redirects an unauthenticated reorder", async () => {
+        const lRes = await req(
+            "/api/admin/recommendations/reorder",
+            "POST",
+            { ids: ["rec-1"] },
+            null,
+        );
+        expect(lRes.status).toBe(302);
+    });
+
+    it("returns 403 for a non-owner reorder", async () => {
+        const lRes = await req(
+            "/api/admin/recommendations/reorder",
+            "POST",
+            { ids: ["rec-1"] },
+            "not-owner@test.com",
+        );
+        expect(lRes.status).toBe(403);
+    });
+
+    // ── Crazy cases ──────────────────────────────────────────────────────
+
+    it("handles a large id list safely (ids are bound, not interpolated)", async () => {
+        const lIds = Array.from({ length: 200 }, (_, i) => `rec-${i}`);
+        const lRes = await req(
+            "/api/admin/recommendations/reorder",
+            "POST",
+            { ids: lIds },
+            OWNER_EMAIL,
+        );
+        expect(lRes.status).toBe(200);
+    });
+});
+
+// ── Toast notification wiring ───────────────────────────────────────────────
+// Confirms the shared showToast() helper and its CSS reach every admin page,
+// since each page's <script> is independently inlined (no shared bundle).
+
+describe("admin pages include the toast helper", () => {
+    const lPages = [
+        "/requests",
+        "/favicon",
+        "/feedback",
+        "/cv",
+        "/content",
+        "/banner",
+    ];
+
+    for (const lPage of lPages) {
+        it(`${lPage} renders the showToast() helper and toast CSS`, async () => {
+            const lRes = await pageReq(lPage);
+            expect(lRes.status).toBe(200);
+            const lHtml = await lRes.text();
+            expect(lHtml).toContain("function showToast(");
+            expect(lHtml).toContain(".toast-container");
+            expect(lHtml).toContain(".toast--success");
+            expect(lHtml).toContain(".toast--error");
+        });
+    }
 });

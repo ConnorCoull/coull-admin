@@ -4,6 +4,7 @@
  * Routes:
  *   GET  /                               → redirect to /requests
  *   GET  /requests                       → access request management (owner-only)
+ *   GET  /users                          → per-site permissions grid (owner-only)
  *   GET  /feedback                       → feedback viewer (owner-only)
  *   GET  /favicon                        → favicon manager (owner-only)
  *   GET  /cv                             → CV upload (owner-only)
@@ -12,6 +13,10 @@
  *   POST /api/admin/requests/:id/approve
  *   POST /api/admin/requests/:id/decline
  *   POST /api/admin/revoke
+ *   POST /api/admin/permissions/save     → apply grid checkbox changes (owner-only)
+ *   POST /api/admin/sites                → register a new site (owner-only)
+ *   POST /api/admin/site-requests/:id/approve
+ *   POST /api/admin/site-requests/:id/decline
  *   POST /api/admin/favicons/:site       → write favicon to KV (owner-only)
  *   DELETE /api/admin/favicons/:site     → remove favicon from KV (owner-only)
  *   POST /api/admin/reading              → add reading paper (owner-only)
@@ -309,9 +314,17 @@ async function checkIpRateLimit(
  * Outputs: HTML nav string.
  */
 function nav(
-    xiActive: "requests" | "feedback" | "favicon" | "cv" | "content" | "banner",
+    xiActive:
+        | "requests"
+        | "users"
+        | "feedback"
+        | "favicon"
+        | "cv"
+        | "content"
+        | "banner",
 ): string {
     const lRActive = xiActive === "requests" ? ' class="active"' : "";
+    const lUActive = xiActive === "users" ? ' class="active"' : "";
     const lFActive = xiActive === "feedback" ? ' class="active"' : "";
     const lIActive = xiActive === "favicon" ? ' class="active"' : "";
     const lCActive = xiActive === "cv" ? ' class="active"' : "";
@@ -319,6 +332,7 @@ function nav(
     const lBActive = xiActive === "banner" ? ' class="active"' : "";
     return `<nav class="nav">
   <a href="/requests"${lRActive}>Requests</a>
+  <a href="/users"${lUActive}>Users</a>
   <a href="/feedback"${lFActive}>Feedback</a>
   <a href="/favicon"${lIActive}>Favicons</a>
   <a href="/cv"${lCActive}>CV</a>
@@ -556,6 +570,50 @@ tr:last-child td { border-bottom: none; }
   font-size: .85rem; background: #fafafa; cursor: pointer;
 }
 .file-btn:hover { background: #efefef; }
+/* ── Permissions grid ── */
+.perm-table th, .perm-table td { text-align: center; }
+.perm-table th:first-child, .perm-table td:first-child,
+.perm-table th:nth-child(2), .perm-table td:nth-child(2) {
+  text-align: left;
+}
+.perm-checkbox { width: 17px; height: 17px; cursor: pointer; }
+.perm-checkbox:disabled { cursor: default; opacity: .4; }
+.save-bar {
+  position: sticky; bottom: 0; margin-top: 1rem;
+  padding: .85rem 1.25rem; background: #fff;
+  border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,.12);
+  display: flex; align-items: center; gap: 1rem; flex-shrink: 0;
+}
+.save-btn {
+  background: #111; color: #fff; border: none;
+  border-radius: 6px; padding: .5rem 1.4rem;
+  font-size: .85rem; cursor: pointer;
+}
+.save-btn:hover:not(:disabled) { background: #333; }
+.save-btn:disabled { opacity: .5; cursor: default; }
+.save-status { font-size: .82rem; color: #666; }
+.add-site-form {
+  display: flex; align-items: flex-end; gap: .75rem; flex-wrap: wrap;
+}
+.add-site-form label {
+  display: flex; flex-direction: column; gap: .3rem;
+  font-size: .78rem; color: #666;
+}
+.add-site-form input[type="text"] {
+  padding: .45rem .65rem; border: 1px solid #ddd;
+  border-radius: 6px; font-size: .85rem;
+}
+.add-site-form .checkbox-label {
+  flex-direction: row; align-items: center; gap: .4rem;
+  padding-bottom: .5rem;
+}
+.add-site-btn {
+  background: #111; color: #fff; border: none;
+  border-radius: 6px; padding: .5rem 1.2rem;
+  font-size: .85rem; cursor: pointer; height: fit-content;
+}
+.add-site-btn:hover:not(:disabled) { background: #333; }
+.add-site-btn:disabled { opacity: .5; cursor: default; }
 /* ── Toast notifications ── */
 .toast-container {
   position: fixed; bottom: 1.25rem; right: 1.25rem;
@@ -1100,6 +1158,473 @@ ${TOAST_CLIENT_JS}
 </script>
 </body>
 </html>`);
+});
+
+// ---------------------------------------------------------------------------
+// GET /users — owner-gated per-site permissions grid.
+// Rows = every account in `user` (auto-fetched — no manual add). Columns =
+// every registered `sites` row. A checkbox reflects a site_permissions row.
+// Changes are diffed client-side against each checkbox's initial state and
+// applied in one batch on Save. Also surfaces pending site_access_requests
+// (a user who hit /no-access on a specific app) and an Add-site form.
+// ---------------------------------------------------------------------------
+
+app.get("/users", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    const lSitesRows = await c.env.DB.prepare(
+        "SELECT slug, display_name, default_open" +
+            " FROM sites ORDER BY created_at ASC",
+    ).all<{ slug: string; display_name: string; default_open: number }>();
+    const lSites = lSitesRows.results;
+
+    const lUsersRows = await c.env.DB.prepare(
+        "SELECT id, name, email FROM user ORDER BY createdAt DESC",
+    ).all<{ id: string; name: string; email: string }>();
+    const lUsers = lUsersRows.results;
+
+    const lGrantRows = await c.env.DB.prepare(
+        "SELECT user_id, site_slug FROM site_permissions",
+    ).all<{ user_id: string; site_slug: string }>();
+    const lGrants = new Set(
+        lGrantRows.results.map((g) => `${g.user_id}|${g.site_slug}`),
+    );
+
+    const lPendingRows = await c.env.DB.prepare(
+        "SELECT id, email, name, site_slug, message, createdAt" +
+            " FROM site_access_requests" +
+            " WHERE approved = 0 AND declined = 0" +
+            " ORDER BY createdAt DESC",
+    ).all<{
+        id: string;
+        email: string;
+        name: string;
+        site_slug: string;
+        message: string | null;
+        createdAt: number;
+    }>();
+    const lPending = lPendingRows.results;
+
+    const lGridHeadHtml = lSites
+        .map((s) => `<th>${escapeHtml(s.display_name)}</th>`)
+        .join("");
+
+    const lGridBodyHtml =
+        lUsers.length === 0
+            ? `<tr><td colspan="${2 + lSites.length}" style="text-align:center;color:#888;padding:2rem">No users yet</td></tr>`
+            : lUsers
+                  .map((u) => {
+                      const lCells = lSites
+                          .map((s) => {
+                              const lChecked = lGrants.has(`${u.id}|${s.slug}`);
+                              return `<td class="perm-cell"><input type="checkbox" class="perm-checkbox"
+        data-user-id="${escapeHtml(u.id)}" data-site-slug="${escapeHtml(s.slug)}"
+        data-initial="${lChecked ? "1" : "0"}" ${lChecked ? "checked" : ""}
+        onchange="updateDirtyState()"></td>`;
+                          })
+                          .join("");
+                      return `
+    <tr data-user-id="${escapeHtml(u.id)}" data-name="${escapeHtml((u.name ?? "").toLowerCase())}" data-email="${escapeHtml(u.email.toLowerCase())}">
+      <td>${escapeHtml(u.name || "—")}</td>
+      <td data-full="${escapeHtml(u.email)}">${emailCellHtml(u.email)}</td>
+      ${lCells}
+    </tr>`;
+                  })
+                  .join("");
+
+    const lPendingHtml =
+        lPending.length === 0
+            ? `<tr><td colspan="6" style="text-align:center;color:#888;padding:2rem">No pending site requests</td></tr>`
+            : lPending
+                  .map(
+                      (r) => `
+    <tr>
+      <td>${escapeHtml(r.name || "—")}</td>
+      <td data-full="${escapeHtml(r.email)}">${emailCellHtml(r.email)}</td>
+      <td>${escapeHtml(r.site_slug)}</td>
+      <td>${fmtDate(r.createdAt)}</td>
+      <td class="msg-cell">${r.message ? escapeHtml(r.message) : '<span style="color:#bbb">—</span>'}</td>
+      <td><span class="action-btns">
+        <button class="approve-btn" data-id="${r.id}" onclick="approveSiteRequest(this)">Approve</button>
+        <button class="decline-btn" data-id="${r.id}" onclick="declineSiteRequest(this)">Decline</button>
+      </span></td>
+    </tr>`,
+                  )
+                  .join("");
+
+    return c.html(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin — Users</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <style>${SHARED_STYLES}</style>
+</head>
+<body>
+${nav("users")}
+<h1>Users &amp; Permissions</h1>
+
+<div class="panel-head">
+  <h2>Pending site requests</h2>
+  <span class="subtitle" id="site-req-count">${lPending.length} pending</span>
+</div>
+<div class="table-wrap" style="margin-bottom:1.5rem">
+  <table>
+    <thead><tr><th>Name</th><th>Email</th><th>Site</th><th>Requested</th><th>Message</th><th>Action</th></tr></thead>
+    <tbody id="site-req-body">${lPendingHtml}</tbody>
+  </table>
+</div>
+
+<div class="panel-head">
+  <h2>Permissions</h2>
+  <span class="subtitle">${lUsers.length} users × ${lSites.length} sites</span>
+</div>
+<input class="search" type="search" placeholder="Search by name or email…"
+       oninput="filterUsers(this.value)" />
+<div class="table-wrap">
+  <table class="perm-table">
+    <thead><tr><th>Name</th><th>Email</th>${lGridHeadHtml}</tr></thead>
+    <tbody id="perm-body">${lGridBodyHtml}</tbody>
+  </table>
+</div>
+<div class="save-bar">
+  <button id="save-btn" class="save-btn" disabled onclick="savePermissions()">Save changes</button>
+  <span class="save-status" id="save-status"></span>
+</div>
+
+<div class="add-form">
+  <h2>Add site</h2>
+  <form class="add-site-form" onsubmit="return addSite(event)">
+    <label>Slug
+      <input type="text" id="site-slug" pattern="[a-z0-9-]{1,63}"
+             placeholder="chat" required>
+    </label>
+    <label>Display name
+      <input type="text" id="site-name" placeholder="Chat" required maxlength="100">
+    </label>
+    <label class="checkbox-label">
+      <input type="checkbox" id="site-default-open">
+      Open to all users by default
+    </label>
+    <button type="submit" class="add-site-btn" id="add-site-btn">Add site</button>
+  </form>
+  <p class="save-status" id="add-site-status"></p>
+</div>
+
+<script>
+  function filterUsers(q) {
+    const lQ = q.toLowerCase();
+    document.querySelectorAll('#perm-body tr[data-user-id]').forEach(row => {
+      const lMatch = !lQ ||
+        row.dataset.name.includes(lQ) ||
+        row.dataset.email.includes(lQ);
+      row.style.display = lMatch ? '' : 'none';
+    });
+  }
+
+  function updateDirtyState() {
+    const boxes = document.querySelectorAll('.perm-checkbox');
+    let dirty = false;
+    boxes.forEach(b => {
+      if (b.checked !== (b.dataset.initial === '1')) dirty = true;
+    });
+    document.getElementById('save-btn').disabled = !dirty;
+  }
+
+  async function savePermissions() {
+    const btn = document.getElementById('save-btn');
+    const status = document.getElementById('save-status');
+    const boxes = document.querySelectorAll('.perm-checkbox');
+    const changes = [];
+    boxes.forEach(b => {
+      const initial = b.dataset.initial === '1';
+      if (b.checked !== initial) {
+        changes.push({
+          userId: b.dataset.userId,
+          siteSlug: b.dataset.siteSlug,
+          granted: b.checked,
+        });
+      }
+    });
+    if (!changes.length) return;
+    btn.disabled = true;
+    status.textContent = 'Saving…';
+    try {
+      const res = await fetch('/api/admin/permissions/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ changes }),
+      });
+      if (res.ok) {
+        boxes.forEach(b => { b.dataset.initial = b.checked ? '1' : '0'; });
+        status.textContent = 'Saved.';
+        setTimeout(() => { status.textContent = ''; }, 2000);
+      } else {
+        status.textContent = 'Save failed — try again.';
+        btn.disabled = false;
+      }
+    } catch (_) {
+      status.textContent = 'Save failed — try again.';
+      btn.disabled = false;
+    }
+  }
+
+  async function addSite(e) {
+    e.preventDefault();
+    const btn = document.getElementById('add-site-btn');
+    const status = document.getElementById('add-site-status');
+    const slug = document.getElementById('site-slug').value.trim().toLowerCase();
+    const name = document.getElementById('site-name').value.trim();
+    const defaultOpen = document.getElementById('site-default-open').checked;
+    btn.disabled = true;
+    status.textContent = 'Adding…';
+    try {
+      const res = await fetch('/api/admin/sites', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slug, displayName: name, defaultOpen }),
+      });
+      if (res.ok) {
+        location.reload();
+      } else {
+        const body = await res.json().catch(() => ({}));
+        status.textContent = body.error || 'Failed to add site.';
+        btn.disabled = false;
+      }
+    } catch (_) {
+      status.textContent = 'Failed to add site.';
+      btn.disabled = false;
+    }
+    return false;
+  }
+
+  async function approveSiteRequest(btn) {
+    const siblings = btn.parentElement.querySelectorAll('button');
+    siblings.forEach(b => b.disabled = true);
+    btn.textContent = 'Approving…';
+    const res = await fetch(
+      '/api/admin/site-requests/' + btn.dataset.id + '/approve',
+      { method: 'POST' },
+    );
+    if (res.ok) {
+      btn.closest('tr').remove();
+      const el = document.getElementById('site-req-count');
+      el.textContent = Math.max(0, parseInt(el.textContent) - 1) + ' pending';
+    } else {
+      const body = await res.json().catch(() => ({}));
+      alert(body.error || 'Approve failed.');
+      siblings.forEach(b => b.disabled = false);
+      btn.textContent = 'Approve';
+    }
+  }
+
+  async function declineSiteRequest(btn) {
+    const siblings = btn.parentElement.querySelectorAll('button');
+    siblings.forEach(b => b.disabled = true);
+    btn.textContent = 'Declining…';
+    const res = await fetch(
+      '/api/admin/site-requests/' + btn.dataset.id + '/decline',
+      { method: 'POST' },
+    );
+    if (res.ok) {
+      btn.closest('tr').remove();
+      const el = document.getElementById('site-req-count');
+      el.textContent = Math.max(0, parseInt(el.textContent) - 1) + ' pending';
+    } else {
+      siblings.forEach(b => b.disabled = false);
+      btn.textContent = 'Decline';
+    }
+  }
+</script>
+</body>
+</html>`);
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/permissions/save — apply grid checkbox diffs (owner-only)
+// Body: { changes: [{ userId, siteSlug, granted }, ...] }
+// ---------------------------------------------------------------------------
+
+app.post("/api/admin/permissions/save", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    let lBody: {
+        changes?: Array<{
+            userId?: unknown;
+            siteSlug?: unknown;
+            granted?: unknown;
+        }>;
+    };
+    try {
+        lBody = await c.req.json();
+    } catch {
+        return c.json({ error: "Invalid request body" }, 400);
+    }
+
+    const lChanges = Array.isArray(lBody.changes) ? lBody.changes : [];
+    if (lChanges.length === 0) return c.json({ ok: true });
+    if (lChanges.length > 500) {
+        return c.json({ error: "Too many changes in one request" }, 400);
+    }
+
+    const lStatements = [];
+    for (const lChange of lChanges) {
+        if (
+            typeof lChange.userId !== "string" ||
+            !lChange.userId ||
+            typeof lChange.siteSlug !== "string" ||
+            !lChange.siteSlug ||
+            typeof lChange.granted !== "boolean"
+        ) {
+            return c.json({ error: "Malformed change entry" }, 400);
+        }
+        lStatements.push(
+            lChange.granted
+                ? c.env.DB.prepare(
+                      "INSERT OR IGNORE INTO site_permissions" +
+                          " (user_id, site_slug) VALUES (?, ?)",
+                  ).bind(lChange.userId, lChange.siteSlug)
+                : c.env.DB.prepare(
+                      "DELETE FROM site_permissions" +
+                          " WHERE user_id = ? AND site_slug = ?",
+                  ).bind(lChange.userId, lChange.siteSlug),
+        );
+    }
+
+    try {
+        await c.env.DB.batch(lStatements);
+    } catch (e) {
+        // Most likely an unknown user_id/site_slug tripping the FK
+        // constraint — surface it rather than a silent partial apply.
+        console.error("permissions/save failed:", e);
+        return c.json({ error: "Unknown user or site" }, 400);
+    }
+    return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/sites — register a new site (owner-only)
+// Body: { slug, displayName, defaultOpen }
+// Backfills a grant for every existing user when defaultOpen is true, so
+// "open to all by default" means all *current* users too, not just future
+// sign-ups (the auth-service create-hook only covers new accounts).
+// ---------------------------------------------------------------------------
+
+app.post("/api/admin/sites", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    let lBody: {
+        slug?: unknown;
+        displayName?: unknown;
+        defaultOpen?: unknown;
+    };
+    try {
+        lBody = await c.req.json();
+    } catch {
+        return c.json({ error: "Invalid request body" }, 400);
+    }
+
+    const lSlug =
+        typeof lBody.slug === "string" ? lBody.slug.trim().toLowerCase() : "";
+    const lName =
+        typeof lBody.displayName === "string" ? lBody.displayName.trim() : "";
+    const lDefaultOpen = lBody.defaultOpen === true;
+
+    if (!SITE_RE.test(lSlug)) {
+        return c.json(
+            { error: "Slug must be lowercase letters, digits, hyphens" },
+            400,
+        );
+    }
+    if (!lName || lName.length > 100) {
+        return c.json(
+            { error: "Display name is required (max 100 chars)" },
+            400,
+        );
+    }
+
+    const lExisting = await c.env.DB.prepare(
+        "SELECT 1 FROM sites WHERE slug = ?",
+    )
+        .bind(lSlug)
+        .first();
+    if (lExisting) return c.json({ error: "That slug is already in use" }, 409);
+
+    await c.env.DB.prepare(
+        "INSERT INTO sites (slug, display_name, default_open)" +
+            " VALUES (?, ?, ?)",
+    )
+        .bind(lSlug, lName, lDefaultOpen ? 1 : 0)
+        .run();
+
+    if (lDefaultOpen) {
+        await c.env.DB.prepare(
+            "INSERT OR IGNORE INTO site_permissions (user_id, site_slug)" +
+                " SELECT id, ? FROM user",
+        )
+            .bind(lSlug)
+            .run();
+    }
+
+    return c.json({ ok: true, slug: lSlug });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/site-requests/:id/approve (owner-only)
+// ---------------------------------------------------------------------------
+
+app.post("/api/admin/site-requests/:id/approve", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+    const lId = c.req.param("id");
+    const lRequest = await c.env.DB.prepare(
+        "SELECT user_id, site_slug FROM site_access_requests WHERE id = ?",
+    )
+        .bind(lId)
+        .first<{ user_id: string; site_slug: string }>();
+    if (!lRequest) return c.json({ error: "Not found" }, 404);
+
+    try {
+        await c.env.DB.batch([
+            c.env.DB.prepare(
+                "INSERT OR IGNORE INTO site_permissions" +
+                    " (user_id, site_slug) VALUES (?, ?)",
+            ).bind(lRequest.user_id, lRequest.site_slug),
+            c.env.DB.prepare(
+                "UPDATE site_access_requests" +
+                    " SET approved = 1, declined = 0 WHERE id = ?",
+            ).bind(lId),
+        ]);
+    } catch (e) {
+        // FK violation: site_slug isn't registered in `sites` yet.
+        console.error("site-requests/approve failed:", e);
+        return c.json(
+            { error: "Register this site in admin before approving" },
+            400,
+        );
+    }
+    return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/site-requests/:id/decline (owner-only)
+// ---------------------------------------------------------------------------
+
+app.post("/api/admin/site-requests/:id/decline", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+    const lId = c.req.param("id");
+    const lResult = await c.env.DB.prepare(
+        "UPDATE site_access_requests SET declined = 1 WHERE id = ?",
+    )
+        .bind(lId)
+        .run();
+    if (!lResult.meta.changes) return c.json({ error: "Not found" }, 404);
+    return c.json({ ok: true });
 });
 
 // ---------------------------------------------------------------------------

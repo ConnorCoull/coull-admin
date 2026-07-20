@@ -24,6 +24,7 @@
  *   POST /api/admin/recommendations      → add recommendation (owner-only)
  *   PUT  /api/admin/recommendations/:id  → edit recommendation (owner-only)
  *   DELETE /api/admin/recommendations/:id
+ *   POST /api/admin/recommendations/reorder → persist drag order (owner-only)
  *   OPTIONS /api/feedback                → CORS preflight
  *   POST /api/feedback                   → submit feedback (session-optional)
  *
@@ -613,6 +614,61 @@ tr:last-child td { border-bottom: none; }
 }
 .add-site-btn:hover:not(:disabled) { background: #333; }
 .add-site-btn:disabled { opacity: .5; cursor: default; }
+/* ── Toast notifications ── */
+.toast-container {
+  position: fixed; bottom: 1.25rem; right: 1.25rem;
+  display: flex; flex-direction: column; gap: .5rem;
+  z-index: 1000; pointer-events: none;
+}
+.toast {
+  display: flex; align-items: center; gap: .5rem;
+  padding: .65rem 1rem; border-radius: 8px;
+  background: #fff; box-shadow: 0 4px 16px rgba(0,0,0,.15);
+  font-size: .85rem; color: #111; border-left: 3px solid #111;
+  opacity: 0; transform: translateY(.5rem);
+  transition: opacity .2s ease, transform .2s ease;
+}
+.toast--show { opacity: 1; transform: translateY(0); }
+.toast--success { border-left-color: #2e7d32; }
+.toast--error { border-left-color: #c0392b; }
+.toast-icon { flex-shrink: 0; font-size: .9rem; line-height: 1; }
+.toast--success .toast-icon { color: #2e7d32; }
+.toast--error .toast-icon { color: #c0392b; }
+`;
+
+// Shared toast-notification helper, inlined into every admin page's own
+// <script> block (each page's script is independent — there is no shared
+// client bundle). Success toasts auto-dismiss quickly; error toasts linger
+// longer so they can actually be read.
+const TOAST_CLIENT_JS = `
+function showToast(xiMsg, xiType) {
+  var lContainer = document.getElementById('toast-container');
+  if (!lContainer) {
+    lContainer = document.createElement('div');
+    lContainer.id = 'toast-container';
+    lContainer.className = 'toast-container';
+    document.body.appendChild(lContainer);
+  }
+  var lToast = document.createElement('div');
+  lToast.className = 'toast toast--' + (xiType === 'error' ? 'error' : 'success');
+  var lIcon = document.createElement('span');
+  lIcon.className = 'toast-icon';
+  lIcon.textContent = xiType === 'error' ? '⚠' : '✓';
+  var lText = document.createElement('span');
+  lText.textContent = xiMsg;
+  lToast.appendChild(lIcon);
+  lToast.appendChild(lText);
+  lContainer.appendChild(lToast);
+  requestAnimationFrame(function() {
+    requestAnimationFrame(function() { lToast.classList.add('toast--show'); });
+  });
+  var lDelay = xiType === 'error' ? 4000 : 2200;
+  setTimeout(function() {
+    lToast.classList.remove('toast--show');
+    lToast.addEventListener('transitionend', function() { lToast.remove(); });
+    setTimeout(function() { lToast.remove(); }, 400);
+  }, lDelay);
+}
 `;
 
 // Inline SVG icons for the email reveal toggle button.
@@ -840,6 +896,7 @@ ${nav("requests")}
 </div>
 
 <script>
+${TOAST_CLIENT_JS}
   const eyeSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14"' +
     ' viewBox="0 0 24 24" fill="none" stroke="currentColor"' +
     ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
@@ -916,9 +973,11 @@ ${nav("requests")}
       const el = document.getElementById('pending-count');
       el.textContent =
         Math.max(0, parseInt(el.textContent) - 1) + ' pending';
+      showToast('Request approved.', 'success');
     } else {
       siblings.forEach(b => b.disabled = false);
       btn.textContent = 'Approve';
+      showToast('Approve failed.', 'error');
     }
   }
 
@@ -968,9 +1027,11 @@ ${nav("requests")}
       newRow.appendChild(tdD);
       newRow.appendChild(tdA);
       tbody.insertBefore(newRow, tbody.firstChild);
+      showToast('Request declined.', 'success');
     } else {
       siblings.forEach(b => b.disabled = false);
       btn.textContent = 'Decline';
+      showToast('Decline failed.', 'error');
     }
   }
 
@@ -998,9 +1059,11 @@ ${nav("requests")}
       const el = document.getElementById('approved-count');
       el.textContent =
         Math.max(0, parseInt(el.textContent) - 1) + ' users';
+      showToast('Access revoked.', 'success');
     } else {
       btn.disabled = false;
       btn.textContent = 'Revoke';
+      showToast('Revoke failed.', 'error');
     }
   }
 
@@ -1016,9 +1079,11 @@ ${nav("requests")}
       const el = document.getElementById('declined-count');
       el.textContent =
         Math.max(0, parseInt(el.textContent) - 1) + ' declined';
+      showToast('Request approved.', 'success');
     } else {
       btn.disabled = false;
       btn.textContent = 'Approve';
+      showToast('Approve failed.', 'error');
     }
   }
 
@@ -1725,6 +1790,7 @@ ${nav("favicon")}
 </div>
 
 <script>
+${TOAST_CLIENT_JS}
 var knownSites = ${JSON.stringify([...KNOWN_SITES])};
 var library = [];
 var activePicker = null;
@@ -1842,6 +1908,7 @@ async function uploadDesign() {
   var data = await res.json();
   if (!res.ok) {
     errEl.textContent = data.error || 'Save failed';
+    showToast(data.error || 'Save failed.', 'error');
     return;
   }
   document.getElementById('design-name').value = '';
@@ -1857,13 +1924,19 @@ async function uploadDesign() {
     library.sort(function(a, b) { return a.name.localeCompare(b.name); });
   }
   renderLibraryGrid();
+  showToast('Design "' + name + '" saved.', 'success');
 }
 
 async function deleteDesign(name) {
   if (!confirm('Delete design "' + name + '"?')) return;
-  await fetch('/api/admin/favicon-library/' + name, { method: 'DELETE' });
+  var res = await fetch('/api/admin/favicon-library/' + name, { method: 'DELETE' });
+  if (!res.ok) {
+    showToast('Delete failed.', 'error');
+    return;
+  }
   library = library.filter(function(d) { return d.name !== name; });
   renderLibraryGrid();
+  showToast('Design "' + name + '" deleted.', 'success');
 }
 
 function closePicker() {
@@ -1913,6 +1986,7 @@ async function assignDesign(site, svg) {
   if (!res.ok) {
     var lErr = await res.json().catch(function() { return {}; });
     msgEl.textContent = lErr.error || 'Save failed (' + res.status + ')';
+    showToast(lErr.error || 'Save failed.', 'error');
     return;
   }
   var t = Date.now();
@@ -1929,6 +2003,7 @@ async function assignDesign(site, svg) {
     actEl.appendChild(btn);
   }
   closePicker();
+  showToast('Favicon updated for "' + site + '".', 'success');
 }
 
 async function resetSite(site, btn) {
@@ -1940,8 +2015,7 @@ async function resetSite(site, btn) {
   );
   if (!res.ok) {
     btn.disabled = false;
-    btn.textContent = 'Reset failed';
-    setTimeout(function() { btn.textContent = 'Reset'; }, 3000);
+    showToast('Reset failed.', 'error');
     return;
   }
   document.getElementById('thumb-' + site).src =
@@ -1953,6 +2027,7 @@ async function resetSite(site, btn) {
     document.getElementById('row-' + site).remove();
     document.getElementById('picker-row-' + site).remove();
   }
+  showToast('Favicon reset for "' + site + '".', 'success');
 }
 
 async function assignDefault(svg) {
@@ -1966,6 +2041,7 @@ async function assignDefault(svg) {
   if (!res.ok) {
     var lErr = await res.json().catch(function() { return {}; });
     msgEl.textContent = lErr.error || 'Save failed (' + res.status + ')';
+    showToast(lErr.error || 'Save failed.', 'error');
     return;
   }
   document.getElementById('default-thumb').src =
@@ -1981,13 +2057,18 @@ async function assignDefault(svg) {
     actEl.appendChild(btn);
   }
   closePicker();
+  showToast('Default favicon updated.', 'success');
 }
 
 async function resetDefault(btn) {
   if (!confirm('Reset platform default to the hardcoded fallback?')) return;
   btn.disabled = true;
   var res = await fetch('/api/admin/favicon/default', { method: 'DELETE' });
-  if (!res.ok) { btn.disabled = false; return; }
+  if (!res.ok) {
+    btn.disabled = false;
+    showToast('Reset failed.', 'error');
+    return;
+  }
   window.location.reload();
 }
 
@@ -2405,6 +2486,7 @@ ${nav("feedback")}
 </div>
 
 <script>
+${TOAST_CLIENT_JS}
   function applyFilters() {
     const app = document.getElementById('app-filter').value;
     const reason = document.getElementById('reason-filter').value;
@@ -2451,6 +2533,7 @@ ${nav("feedback")}
 
     if (!res.ok) {
       pick.querySelectorAll('button').forEach(b => b.disabled = false);
+      showToast('Archive failed.', 'error');
       return;
     }
 
@@ -2475,6 +2558,7 @@ ${nav("feedback")}
     archivedEl.textContent = (parseInt(archivedEl.textContent) + 1) + ' items';
 
     document.getElementById('purge-btn').disabled = false;
+    showToast('Feedback archived.', 'success');
   }
 
   async function purgeArchived() {
@@ -2491,9 +2575,11 @@ ${nav("feedback")}
         ' style="text-align:center;color:#888;padding:2rem">No archived items</td></tr>';
       document.getElementById('archived-count').textContent = '0 items';
       btn.textContent = 'Delete all';
+      showToast('Archived items purged.', 'success');
     } else {
       btn.disabled = false;
       btn.textContent = 'Delete all';
+      showToast('Purge failed.', 'error');
     }
   }
 </script>
@@ -2710,6 +2796,7 @@ ${nav("cv")}
   <p id="upload-msg" style="margin:.75rem 0 0"></p>
 </div>
 <script>
+${TOAST_CLIENT_JS}
 async function uploadCv() {
   const lFile = document.getElementById('cv-file').files[0];
   const lMsg  = document.getElementById('upload-msg');
@@ -2726,15 +2813,15 @@ async function uploadCv() {
     });
     const lData = await lRes.json();
     if (lRes.ok) {
-      lMsg.textContent = 'CV updated successfully.';
-      lMsg.className = 'success';
+      lMsg.textContent = '';
+      showToast('CV updated successfully.', 'success');
     } else {
-      lMsg.textContent = lData.error ?? 'Upload failed.';
-      lMsg.className = 'error';
+      lMsg.textContent = '';
+      showToast(lData.error ?? 'Upload failed.', 'error');
     }
   } catch (_) {
-    lMsg.textContent = 'Network error — please try again.';
-    lMsg.className = 'error';
+    lMsg.textContent = '';
+    showToast('Network error — please try again.', 'error');
   }
   lBtn.disabled = false;
 }
@@ -2800,8 +2887,9 @@ app.post("/api/admin/cv", async (c) => {
 /**
  * Inputs: authenticated owner request.
  * Outputs: HTML page with two panels: reading papers and recommendations.
- * Logic: reads all papers (newest first) and all recommendations (oldest
- *   first) from D1; the top 5 papers are marked as "live" on the homepage.
+ * Logic: reads all papers (newest first) and all recommendations (manual
+ *   sort_order) from D1; the top 5 papers are marked as "live" on the
+ *   homepage.
  */
 app.get("/content", async (c) => {
     const lUnauth = await requireOwner(c);
@@ -2820,7 +2908,7 @@ app.get("/content", async (c) => {
         }>(),
         c.env.DB.prepare(
             "SELECT id, category, text" +
-                " FROM recommendations ORDER BY created_at ASC",
+                " FROM recommendations ORDER BY sort_order ASC",
         ).all<{ id: string; category: string; text: string }>(),
     ]);
 
@@ -2853,6 +2941,9 @@ app.get("/content", async (c) => {
         .map((r) => {
             return (
                 `<tr id="rec-row-${escapeHtml(r.id)}">` +
+                `<td class="rec-handle-cell">` +
+                `<button class="drag-handle" aria-label="Drag to reorder" ` +
+                `title="Drag to reorder">⠿</button></td>` +
                 `<td class="rec-cat-cell">${escapeHtml(r.category)}</td>` +
                 `<td class="rec-text-cell">${escapeHtml(r.text)}</td>` +
                 `<td class="action-btns">` +
@@ -2925,6 +3016,27 @@ app.get("/content", async (c) => {
 .edit-modal h3 { margin: 0 0 1rem; font-size: 1rem; }
 .edit-modal .add-row { margin-bottom: .75rem; }
 .modal-btns { display: flex; gap: .5rem; justify-content: flex-end; }
+.rec-handle-cell { width: 2rem; padding-right: 0 !important; }
+.drag-handle {
+  width: 1.6rem; height: 1.6rem; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid #ddd; border-radius: 5px;
+  background: repeating-linear-gradient(
+    0deg, #f2f2f2, #f2f2f2 2px, #e4e4e4 2px, #e4e4e4 4px
+  );
+  color: #666; font-size: 1rem; line-height: 1;
+  cursor: grab; user-select: none;
+}
+.drag-handle:hover {
+  border-color: #bbb;
+  background: repeating-linear-gradient(
+    0deg, #e8e8e8, #e8e8e8 2px, #dcdcdc 2px, #dcdcdc 4px
+  );
+}
+.drag-handle:active,
+tr.dragging .drag-handle { cursor: grabbing; }
+tr.dragging { opacity: .4; }
+tr.drag-over { box-shadow: inset 0 2px 0 #111; }
   </style>
 </head>
 <body>
@@ -2974,8 +3086,8 @@ ${nav("content")}
   <div class="section-card">
     <div>
       <h2>Recommendations</h2>
-      <p class="hint">All entries appear on the homepage in the order added.
-        Category is the label (e.g. Album, Film).</p>
+      <p class="hint">Appear on the homepage in the order shown below — drag
+        the ⠿ handle to reorder. Category is the label (e.g. Album, Film).</p>
     </div>
 
     <div class="add-row" id="rec-form">
@@ -2991,7 +3103,7 @@ ${nav("content")}
     <div class="table-wrap">
       <table>
         <thead>
-          <tr><th>Category</th><th>Text</th><th></th></tr>
+          <tr><th></th><th>Category</th><th>Text</th><th></th></tr>
         </thead>
         <tbody id="recs-tbody">${lRecRows}</tbody>
       </table>
@@ -3020,6 +3132,7 @@ ${nav("content")}
 </div>
 
 <script>
+${TOAST_CLIENT_JS}
 // ── Paper helpers ────────────────────────────────────────────────────────────
 
 async function addPaper() {
@@ -3075,6 +3188,7 @@ async function addPaper() {
     // Clear form
     ['p-title','p-authors','p-year','p-href'].forEach(id =>
       document.getElementById(id).value = '');
+    showToast('Paper added.', 'success');
   } catch (_) {
     lErr.textContent = 'Network error — please try again.';
   }
@@ -3089,11 +3203,12 @@ async function deletePaper(xiId) {
     if (lRes.ok) {
       document.getElementById('paper-row-' + xiId)?.remove();
       refreshLiveBadges();
+      showToast('Paper deleted.', 'success');
     } else {
       const lData = await lRes.json();
-      alert(lData.error ?? 'Delete failed.');
+      showToast(lData.error ?? 'Delete failed.', 'error');
     }
-  } catch (_) { alert('Network error.'); }
+  } catch (_) { showToast('Network error.', 'error'); }
 }
 
 /**
@@ -3142,6 +3257,8 @@ async function addRec() {
     if (!lRes.ok) { lErr.textContent = lData.error ?? 'Failed.'; return; }
 
     const lRow = '<tr id="rec-row-' + escHtml(lData.id) + '">' +
+      '<td class="rec-handle-cell"><button class="drag-handle" ' +
+      'aria-label="Drag to reorder" title="Drag to reorder">⠿</button></td>' +
       '<td class="rec-cat-cell">' + escHtml(lCat) + '</td>' +
       '<td class="rec-text-cell">' + escHtml(lText) + '</td>' +
       '<td class="action-btns">' +
@@ -3155,6 +3272,7 @@ async function addRec() {
 
     document.getElementById('r-cat').value = '';
     document.getElementById('r-text').value = '';
+    showToast('Recommendation added.', 'success');
   } catch (_) {
     lErr.textContent = 'Network error — please try again.';
   }
@@ -3207,6 +3325,7 @@ async function saveRec() {
         "','" + escJs(lText) + "')");
     }
     closeRecModal();
+    showToast('Recommendation updated.', 'success');
   } catch (_) {
     lErr.textContent = 'Network error — please try again.';
   }
@@ -3221,11 +3340,98 @@ async function deleteRec(xiId) {
     );
     if (lRes.ok) {
       document.getElementById('rec-row-' + xiId)?.remove();
+      showToast('Recommendation deleted.', 'success');
     } else {
       const lData = await lRes.json();
-      alert(lData.error ?? 'Delete failed.');
+      showToast(lData.error ?? 'Delete failed.', 'error');
     }
-  } catch (_) { alert('Network error.'); }
+  } catch (_) { showToast('Network error.', 'error'); }
+}
+
+// ── Recommendation drag-to-reorder ──────────────────────────────────────────
+// Uses native HTML5 drag & drop, delegated on the tbody so rows added later
+// by addRec() work without any extra wiring. A row is only made draggable
+// while its grip handle is held (mousedown → mouseup/dragend), so dragging
+// text or clicking Edit/Delete never accidentally moves a row.
+
+(function initRecDnD() {
+  const lTbody = document.getElementById('recs-tbody');
+  let lDragRow = null;
+
+  lTbody.addEventListener('mousedown', function(e) {
+    const lHandle = e.target.closest('.drag-handle');
+    if (lHandle) lHandle.closest('tr').draggable = true;
+  });
+
+  // Safety net: if a handle was pressed but no drag occurred, undo it.
+  document.addEventListener('mouseup', function() {
+    lTbody.querySelectorAll('tr[draggable="true"]').forEach(function(r) {
+      if (r !== lDragRow) r.draggable = false;
+    });
+  });
+
+  lTbody.addEventListener('dragstart', function(e) {
+    lDragRow = e.target.closest('tr');
+    if (!lDragRow) return;
+    e.dataTransfer.effectAllowed = 'move';
+    lDragRow.classList.add('dragging');
+  });
+
+  lTbody.addEventListener('dragover', function(e) {
+    if (!lDragRow) return;
+    e.preventDefault();
+    const lOverRow = e.target.closest('tr');
+    if (!lOverRow || lOverRow === lDragRow) return;
+    lTbody.querySelectorAll('.drag-over').forEach(function(r) {
+      r.classList.remove('drag-over');
+    });
+    lOverRow.classList.add('drag-over');
+  });
+
+  lTbody.addEventListener('drop', function(e) {
+    if (!lDragRow) return;
+    e.preventDefault();
+    const lOverRow = e.target.closest('tr');
+    if (lOverRow && lOverRow !== lDragRow) {
+      const lRect = lOverRow.getBoundingClientRect();
+      const lBefore = e.clientY - lRect.top < lRect.height / 2;
+      lTbody.insertBefore(lDragRow, lBefore ? lOverRow : lOverRow.nextSibling);
+    }
+    persistRecOrder();
+  });
+
+  lTbody.addEventListener('dragend', function() {
+    lTbody.querySelectorAll('.dragging, .drag-over').forEach(function(r) {
+      r.classList.remove('dragging');
+      r.classList.remove('drag-over');
+    });
+    if (lDragRow) lDragRow.draggable = false;
+    lDragRow = null;
+  });
+})();
+
+/** Push the tbody's current row order to the server as each id's sort_order. */
+async function persistRecOrder() {
+  const lIds = Array.from(
+    document.getElementById('recs-tbody').querySelectorAll('tr'),
+  ).map(function(r) { return r.id.replace('rec-row-', ''); });
+
+  try {
+    const lRes = await fetch('/api/admin/recommendations/reorder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: lIds }),
+    });
+    if (lRes.ok) {
+      showToast('Order saved.', 'success');
+    } else {
+      showToast('Could not save the new order — reloading to resync.', 'error');
+      location.reload();
+    }
+  } catch (_) {
+    showToast('Network error — reloading to resync.', 'error');
+    location.reload();
+  }
 }
 
 // ── Utilities ────────────────────────────────────────────────────────────────
@@ -3348,7 +3554,8 @@ app.delete("/api/admin/reading/:id", async (c) => {
  * Outputs: { ok: true, id: string } on success; { error } (400) on
  *   validation failure.
  * Logic: validates non-empty fields, inserts with a new UUID and current
- *   timestamp for both created_at (ordering) and updated_at.
+ *   timestamp for created_at/updated_at, and a sort_order one past the
+ *   current maximum so new entries land at the end of the list.
  */
 app.post("/api/admin/recommendations", async (c) => {
     const lUnauth = await requireOwner(c);
@@ -3369,8 +3576,10 @@ app.post("/api/admin/recommendations", async (c) => {
     const lId = crypto.randomUUID();
     const lNow = Date.now();
     await c.env.DB.prepare(
-        "INSERT INTO recommendations (id, category, text, created_at, updated_at)" +
-            " VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO recommendations" +
+            " (id, category, text, created_at, updated_at, sort_order)" +
+            " VALUES (?, ?, ?, ?, ?," +
+            " (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM recommendations))",
     )
         .bind(lId, lCategory, lText, lNow, lNow)
         .run();
@@ -3440,6 +3649,43 @@ app.delete("/api/admin/recommendations/:id", async (c) => {
     if ((lResult.meta.changes ?? 0) === 0) {
         return c.json({ error: "Not found" }, 404);
     }
+    return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/recommendations/reorder — persist a new manual order.
+// ---------------------------------------------------------------------------
+
+/**
+ * Inputs: JSON body { ids: string[] } — recommendation ids in the desired
+ *   display order (as dragged in the admin UI).
+ * Outputs: { ok: true } on success; { error } (400) on validation failure.
+ * Logic: validates a non-empty array of non-empty strings, then writes each
+ *   id's array index as its sort_order in a single D1 batch.
+ */
+app.post("/api/admin/recommendations/reorder", async (c) => {
+    const lUnauth = await requireOwner(c);
+    if (lUnauth) return lUnauth;
+
+    const lBody = await c.req.json<{ ids?: unknown }>();
+    const lIds = lBody.ids;
+
+    if (
+        !Array.isArray(lIds) ||
+        lIds.length === 0 ||
+        !lIds.every((id) => typeof id === "string" && id.length > 0)
+    ) {
+        return c.json({ error: "ids must be a non-empty string array" }, 400);
+    }
+
+    await c.env.DB.batch(
+        lIds.map((id, i) =>
+            c.env.DB.prepare(
+                "UPDATE recommendations SET sort_order = ? WHERE id = ?",
+            ).bind(i, id),
+        ),
+    );
+
     return c.json({ ok: true });
 });
 
@@ -3547,7 +3793,6 @@ ${nav("banner")}
              border:1px solid #e0e0e0;border-radius:4px">
     <button class="approve-btn" onclick="saveGlobal(this)">Save</button>
   </div>
-  <p id="global-status" style="font-size:.8rem;margin:.4rem 0 0;min-height:1.2em"></p>
 </section>
 
 <section class="add-form">
@@ -3582,26 +3827,23 @@ ${nav("banner")}
 </section>
 
 <script>
+${TOAST_CLIENT_JS}
   async function saveGlobal(btn) {
     btn.disabled = true;
     const enabled = document.getElementById('global-enabled').checked;
     const message = document.getElementById('global-msg').value.trim();
-    const status = document.getElementById('global-status');
     const res = await fetch('/api/admin/banner/global', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled, message }),
     });
     if (res.ok) {
-      status.style.color = '#27ae60';
-      status.textContent = 'Saved.';
+      showToast('Global banner saved.', 'success');
     } else {
       const body = await res.json().catch(() => ({}));
-      status.style.color = '#c0392b';
-      status.textContent = body.error || 'Save failed.';
+      showToast(body.error || 'Save failed.', 'error');
     }
     btn.disabled = false;
-    setTimeout(function() { status.textContent = ''; }, 3000);
   }
 
   async function saveSite(site, btn) {
@@ -3613,9 +3855,11 @@ ${nav("banner")}
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled, message }),
     });
-    if (!res.ok) {
+    if (res.ok) {
+      showToast('Banner saved for "' + site + '".', 'success');
+    } else {
       const body = await res.json().catch(() => ({}));
-      alert(body.error || 'Save failed.');
+      showToast(body.error || 'Save failed.', 'error');
     }
     btn.disabled = false;
   }
@@ -3629,8 +3873,9 @@ ${nav("banner")}
     if (res.ok) {
       document.getElementById('en-' + site).checked = false;
       document.getElementById('msg-' + site).value = '';
+      showToast('Banner cleared for "' + site + '".', 'success');
     } else {
-      alert('Clear failed.');
+      showToast('Clear failed.', 'error');
     }
     btn.disabled = false;
   }

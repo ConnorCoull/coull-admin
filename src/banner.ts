@@ -11,8 +11,9 @@
  * injects a full-width top strip into the host page as document.body's first
  * child (normal flow — pushes content down rather than overlaying it).
  *
- * Dismiss state is persisted to localStorage keyed by app + message text, so
- * a new or changed message always re-shows even after a previous dismiss.
+ * Dismiss state is persisted to localStorage keyed by app, alongside the
+ * dismissed message and a timestamp. A dismissal expires after 1 day, and a
+ * changed message always re-shows immediately regardless of TTL.
  *
  * Resolution order (server-side, see GET /api/banner):
  *   1. Global config (platform_banner) — wins over everything when enabled.
@@ -47,15 +48,21 @@ export const BANNER_SOURCE = `(() => {
     if (document.querySelector("[data-coull-banner]")) return;
 
     // ------------------------------------------------------------------
-    // Dismiss persistence — stores the last dismissed message per app, so
-    // a new or changed message always re-shows. Fails silently in private
-    // browsing modes that block localStorage writes.
+    // Dismiss persistence — stores the last dismissed message + timestamp
+    // per app. A dismissal expires after lDismissTtlMs, and a changed
+    // message always re-shows immediately regardless of TTL. Fails
+    // silently in private browsing modes that block localStorage writes.
     // ------------------------------------------------------------------
     var lStorageKey = "coull_banner_dismissed_" + lApp;
+    var lDismissTtlMs = 24 * 60 * 60 * 1000; // 1 day
 
     function isDismissed(xiMessage) {
         try {
-            return localStorage.getItem(lStorageKey) === xiMessage;
+            var lRaw = localStorage.getItem(lStorageKey);
+            if (!lRaw) return false;
+            var lData = JSON.parse(lRaw);
+            if (lData.message !== xiMessage) return false;
+            return (Date.now() - lData.dismissedAt) < lDismissTtlMs;
         } catch (_) {
             return false;
         }
@@ -63,7 +70,10 @@ export const BANNER_SOURCE = `(() => {
 
     function saveDismissed(xiMessage) {
         try {
-            localStorage.setItem(lStorageKey, xiMessage);
+            localStorage.setItem(
+                lStorageKey,
+                JSON.stringify({ message: xiMessage, dismissedAt: Date.now() })
+            );
         } catch (_) {}
     }
 
